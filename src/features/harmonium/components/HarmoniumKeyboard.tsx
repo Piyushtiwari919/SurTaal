@@ -107,9 +107,13 @@ export const HarmoniumKeyboard: React.FC<HarmoniumKeyboardProps> = ({
   };
 
   const handleBedPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    // Prevent mobile focus highlight, synthetic mouse click, and Android long-press selection
     if (e.pointerType === "touch") {
       e.preventDefault();
+    }
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      // Ignore synthetic events in automated tests
     }
     const midi = extractMidiFromTarget(e.target);
     if (midi !== null) {
@@ -118,12 +122,25 @@ export const HarmoniumKeyboard: React.FC<HarmoniumKeyboardProps> = ({
   };
 
   const handleBedPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (e.buttons === 0 && e.pressure === 0) return;
+    if (e.pointerType === "mouse" && e.buttons === 0) return;
     const elUnderFinger = document.elementFromPoint(e.clientX, e.clientY);
     const midi = extractMidiFromTarget(elUnderFinger);
     if (midi !== null) {
       onPointerEnterKey(e.pointerId, midi);
     }
+  };
+
+  const handleBedPointerUpOrCancel = (
+    e: React.PointerEvent<HTMLDivElement>,
+  ) => {
+    try {
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }
+    } catch {
+      // Ignore synthetic events
+    }
+    onPointerUpKey(e.pointerId);
   };
 
   const renderKeyboardDeck = (
@@ -143,9 +160,8 @@ export const HarmoniumKeyboard: React.FC<HarmoniumKeyboardProps> = ({
           onContextMenu={(e) => e.preventDefault()}
           onPointerDown={handleBedPointerDown}
           onPointerMove={handleBedPointerMove}
-          onPointerUp={(e) => onPointerUpKey(e.pointerId)}
-          onPointerCancel={(e) => onPointerUpKey(e.pointerId)}
-          onPointerLeave={(e) => onPointerUpKey(e.pointerId)}
+          onPointerUp={handleBedPointerUpOrCancel}
+          onPointerCancel={handleBedPointerUpOrCancel}
         >
           {whiteKeys.map((k) => {
             const isActive = activeMidis.has(k.midi);

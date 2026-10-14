@@ -7,12 +7,18 @@ export interface SampleBankStatus {
   error?: string;
 }
 
+export interface ReedBufferPair {
+  nar: AudioBuffer;
+  mada: AudioBuffer;
+}
+
 /**
- * Generates and caches clean, unclipped, phase-aligned brass free-reed wavetables
- * modeled on an Indian Palitana harmonium reed bank.
+ * Generates and caches clean, unclipped, phase-locked brass free-reed wavetables
+ * with distinct Nar (Male) and Mada (Female) phase/harmonic profiles so dual reeds
+ * never suffer from 180-degree destructive phase dropouts during sustained notes.
  */
 export class SampleBank {
-  private bufferCache = new Map<number, AudioBuffer>();
+  private bufferCache = new Map<number, ReedBufferPair>();
   private status: SampleBankStatus = {
     mode: "synthesized-reed-bank",
     loadedCount: 0,
@@ -29,8 +35,8 @@ export class SampleBank {
   ): Promise<SampleBankStatus> {
     for (const midi of midiNotes) {
       if (!this.bufferCache.has(midi)) {
-        const buffer = this.buildCleanHarmoniumReedBuffer(ctx, midi);
-        this.bufferCache.set(midi, buffer);
+        const pair = this.buildReedBufferPair(ctx, midi);
+        this.bufferCache.set(midi, pair);
       }
     }
 
@@ -46,68 +52,89 @@ export class SampleBank {
     midi: number,
     _reedMode?: ReedMode,
   ): AudioBuffer {
+    return this.getOrCreateReedPair(ctx, midi).nar;
+  }
+
+  public getOrCreateReedPair(ctx: AudioContext, midi: number): ReedBufferPair {
     const existing = this.bufferCache.get(midi);
     if (existing) {
       return existing;
     }
-    const created = this.buildCleanHarmoniumReedBuffer(ctx, midi);
+    const created = this.buildReedBufferPair(ctx, midi);
     this.bufferCache.set(midi, created);
     return created;
   }
 
+  private buildReedBufferPair(ctx: AudioContext, midi: number): ReedBufferPair {
+    const nar = this.buildSingleReedBuffer(ctx, midi, "nar");
+    const mada = this.buildSingleReedBuffer(ctx, midi, "mada");
+    return { nar, mada };
+  }
+
   /**
-   * Builds a seamless, zero-distortion single brass reed buffer.
-   * Key-scales the fundamental and upper partials across Mandra, Madhya, and Taar saptaks
-   * so low notes never boom ("futta bass") and high notes remain sweet and warm.
+   * Builds a click-free, zero-dropout reed buffer.
+   * Uses an exact integer number of samples per cycle so sample[length - 1] wraps into sample[0]
+   * with zero phase jump even when detuned.
    */
-  private buildCleanHarmoniumReedBuffer(
+  private buildSingleReedBuffer(
     ctx: AudioContext,
     midi: number,
+    character: "nar" | "mada",
   ): AudioBuffer {
     const sampleRate = ctx.sampleRate;
-    const freq = midiToFrequency(midi);
+    const targetFreq = midiToFrequency(midi);
 
-    // Choose an integer number of cycles (~0.5s) for a lightweight, phase-locked loop
-    const numCycles = Math.max(16, Math.round(freq * 0.5));
-    const exactDurationSec = numCycles / freq;
-    const length = Math.max(1024, Math.round(sampleRate * exactDurationSec));
+    // Exact integer samples per single wave period guarantees 100% glitch-free looping
+    const samplesPerCycle = Math.max(32, Math.round(sampleRate / targetFreq));
+    const numCycles = 64;
+    const length = samplesPerCycle * numCycles;
     const buffer = ctx.createBuffer(1, length, sampleRate);
     const data = buffer.getChannelData(0);
 
-    // Key-tracking: tame fundamental on low bass notes (< C4) so it never sounds muddy/boomy
     const fundamentalWeight = midi < 55 ? 0.42 : midi < 62 ? 0.58 : 0.76;
 
-    // Palitana brass free-reed harmonic profile:
-    // Strong 2nd (octave) and 3rd (fifth) harmonics give the signature woody Indian harmonium voice
-    const harmonics = [
-      fundamentalWeight, // H1: Fundamental
-      1.0, // H2: Octave body (core harmonium warmth)
-      0.66, // H3: Twelfth (woody reed presence)
-      0.4, // H4: Double octave
-      0.24, // H5: Sweet major third partial
-      0.13, // H6: Brilliance
-      0.04, // H7: Kept very low to avoid harsh metallic buzz
-      0.045, // H8: Upper air shimmer
-      0.02, // H9
-      0.01, // H10
-    ];
+    // Nar emphasizes odd/fundamental woody body; Mada emphasizes sweet octave/fifth shimmer
+    // This prevents 180-degree destructive phase cancellation when both reeds beat together.
+    const harmonics =
+      character === "nar"
+        ? [
+            fundamentalWeight,
+            1.0,
+            0.66,
+            0.4,
+            0.24,
+            0.13,
+            0.04,
+            0.045,
+            0.02,
+            0.01,
+          ]
+        : [
+            fundamentalWeight * 0.72,
+            0.92,
+            0.78,
+            0.32,
+            0.28,
+            0.16,
+            0.03,
+            0.05,
+            0.02,
+            0.01,
+          ];
 
-    // Soften upper harmonics on high Taar Saptak notes so they stay sweet and round
     const highRegisterDamping = midi > 70 ? 0.65 : midi > 64 ? 0.85 : 1.0;
     const nyquist = sampleRate * 0.42;
+    const exactCycleFreq = sampleRate / samplesPerCycle;
     let maxPeak = 0.0001;
 
-    // Recompute exact fundamental frequency locked to the integer buffer length
-    // so every harmonic completes an exact integer number of cycles with 0.0 phase error
-    const lockedFundamentalFreq = (numCycles * sampleRate) / length;
-
     for (let i = 0; i < length; i++) {
-      const t = i / sampleRate;
+      // Normalized angle for 1 cycle = 2*PI * (i / samplesPerCycle)
+      const baseAngle = (2 * Math.PI * i) / samplesPerCycle;
       let sample = 0;
 
       for (let h = 0; h < harmonics.length; h++) {
         const harmonicNumber = h + 1;
-        const hFreq = lockedFundamentalFreq * harmonicNumber;
+        const hFreq = exactCycleFreq * harmonicNumber;
         if (hFreq >= nyquist) break;
 
         let amp = harmonics[h];
@@ -115,15 +142,21 @@ export class SampleBank {
           amp *= highRegisterDamping;
         }
 
-        // Acoustic soundboard formant emphasis (500 Hz - 1500 Hz vocal sweet spot)
         if (hFreq >= 480 && hFreq <= 1550) {
           amp *= 1.18;
         } else if (hFreq < 190) {
-          amp *= 0.55; // Prevent low-frequency speaker mud
+          amp *= 0.55;
         }
 
-        // Alternating cosine/sine phase alignment without clipping
-        sample += amp * Math.sin(2 * Math.PI * hFreq * t);
+        // Quadrature phase offset per harmonic between Nar and Mada prevents simultaneous nulling
+        const phaseShift =
+          character === "mada"
+            ? harmonicNumber % 2 === 0
+              ? Math.PI * 0.35
+              : -Math.PI * 0.25
+            : 0;
+
+        sample += amp * Math.sin(baseAngle * harmonicNumber + phaseShift);
       }
 
       data[i] = sample;
@@ -133,7 +166,6 @@ export class SampleBank {
       }
     }
 
-    // Normalize purely linearly (NO Math.tanh distortion!) to a clean 0.65 peak
     const targetPeak = 0.65;
     const scale = targetPeak / maxPeak;
     for (let i = 0; i < length; i++) {

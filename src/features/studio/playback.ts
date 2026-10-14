@@ -63,8 +63,24 @@ export class CompositionPlayer {
         }
       }
 
+      // 1. Process note ends first so same-pitch re-triggers on the exact same beat never get killed
       for (const note of composition.notes) {
         const endMs = note.startTimeMs + note.durationMs;
+        if (this.elapsedMs >= endMs && !this.triggeredEnds.has(note.id)) {
+          this.triggeredEnds.add(note.id);
+          this.activeNotes.delete(note.id);
+
+          const stillHeldByAnotherNote = Array.from(
+            this.activeNotes.values(),
+          ).some((other) => other.midi === note.midi);
+          if (!stillHeldByAnotherNote) {
+            callbacks.onNoteEnd(note);
+          }
+        }
+      }
+
+      // 2. Process note starts second
+      for (const note of composition.notes) {
         if (
           this.elapsedMs >= note.startTimeMs &&
           !this.triggeredStarts.has(note.id)
@@ -72,11 +88,6 @@ export class CompositionPlayer {
           this.triggeredStarts.add(note.id);
           this.activeNotes.set(note.id, note);
           callbacks.onNoteStart(note);
-        }
-        if (this.elapsedMs >= endMs && !this.triggeredEnds.has(note.id)) {
-          this.triggeredEnds.add(note.id);
-          this.activeNotes.delete(note.id);
-          callbacks.onNoteEnd(note);
         }
       }
 

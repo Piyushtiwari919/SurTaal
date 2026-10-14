@@ -28,10 +28,11 @@ export class HarmoniumAudioEngine {
   private convolver: ConvolverNode | null = null;
   private droneSources: AudioBufferSourceNode[] = [];
   private droneGain: GainNode | null = null;
+  private activeDroneStateKey = "";
   private noiseBuffer: AudioBuffer | null = null;
 
   private sampleBank = new SampleBank();
-  private voiceManager = new VoiceManager(12);
+  private voiceManager = new VoiceManager(14);
 
   private taalTimerId: number | null = null;
   private currentTaalId: TaalId = "none";
@@ -99,13 +100,23 @@ export class HarmoniumAudioEngine {
     this.triggerNoteInternal(midi, velocity);
   }
 
+  private getExactPitchPlaybackRate(ctx: AudioContext, midi: number): number {
+    const targetFreq = midiToFrequency(midi);
+    const samplesPerCycle = Math.max(
+      32,
+      Math.round(ctx.sampleRate / targetFreq),
+    );
+    const bufferNaturalFreq = ctx.sampleRate / samplesPerCycle;
+    return targetFreq / bufferNaturalFreq;
+  }
+
   private triggerNoteInternal(midi: number, velocity: number): void {
     if (!this.ctx || !this.dryGain || !this.wetGain) return;
 
     const now = this.ctx.currentTime;
-    const baseBuffer = this.sampleBank.getOrCreateBuffer(this.ctx, midi);
+    const reedPair = this.sampleBank.getOrCreateReedPair(this.ctx, midi);
+    const baseRate = this.getExactPitchPlaybackRate(this.ctx, midi);
 
-    // Individual note Jali (wooden grille) low-pass filter controlled by Bellows air pressure
     const filter = this.ctx.createBiquadFilter();
     filter.type = "lowpass";
     filter.frequency.setValueAtTime(1500 + this.settings.bellows * 1400, now);
@@ -117,37 +128,41 @@ export class HarmoniumAudioEngine {
       (0.18 + this.settings.bellows * 0.24) * velocity,
     );
 
-    // Smooth 26ms bellows air-pressure attack (no pop, no harsh click)
+    // Smooth 22ms bellows air-pressure attack
     voiceGain.gain.setValueAtTime(0.0001, now);
-    voiceGain.gain.linearRampToValueAtTime(targetGain, now + 0.026);
+    voiceGain.gain.linearRampToValueAtTime(targetGain, now + 0.022);
 
     const sources: AudioBufferSourceNode[] = [];
     const subGains: GainNode[] = [];
 
     // 1. Primary 8' Nar Reed (Male Reed - 0 cents)
     const narSource = this.ctx.createBufferSource();
-    narSource.buffer = baseBuffer;
+    narSource.buffer = reedPair.nar;
     narSource.loop = true;
+    narSource.playbackRate.setValueAtTime(baseRate, now);
+
     const narGain = this.ctx.createGain();
-    narGain.gain.setValueAtTime(0.65, now);
+    narGain.gain.setValueAtTime(0.72, now);
     narSource.connect(narGain);
     narGain.connect(filter);
     narSource.start(now);
     sources.push(narSource);
     subGains.push(narGain);
 
-    // 2. Secondary 8' Mada Reed (Female Celeste Reed - detuned +6.5 cents for authentic Indian shimmer)
+    // 2. Secondary 8' Mada Reed (Female Celeste Reed - uses orthogonal mada buffer + 3.8 cents shimmer)
+    // Never cancels out Nar reed, ensuring a continuous, unbroken sustain
     if (
       this.settings.reedMode === "double" ||
       this.settings.reedMode === "triple"
     ) {
       const madaSource = this.ctx.createBufferSource();
-      madaSource.buffer = baseBuffer;
+      madaSource.buffer = reedPair.mada;
       madaSource.loop = true;
-      madaSource.detune.setValueAtTime(6.5, now);
+      madaSource.playbackRate.setValueAtTime(baseRate, now);
+      madaSource.detune.setValueAtTime(3.8, now);
 
       const madaGain = this.ctx.createGain();
-      madaGain.gain.setValueAtTime(0.52, now);
+      madaGain.gain.setValueAtTime(0.42, now);
       madaSource.connect(madaGain);
       madaGain.connect(filter);
       madaSource.start(now);
@@ -155,17 +170,19 @@ export class HarmoniumAudioEngine {
       subGains.push(madaGain);
     }
 
-    // 3. Third 4' Zava / Taar Octave Reed (only in Triple Reed mode - adds upper sparkle, NOT muddy sub-bass)
+    // 3. Third 4' Zava / Taar Octave Reed (Triple Reed mode)
     if (this.settings.reedMode === "triple") {
       const octaveMidi = clampMidi(midi + 12);
-      const octaveBuffer = this.sampleBank.getOrCreateBuffer(
+      const octavePair = this.sampleBank.getOrCreateReedPair(
         this.ctx,
         octaveMidi,
       );
+      const octaveRate = this.getExactPitchPlaybackRate(this.ctx, octaveMidi);
       const taarSource = this.ctx.createBufferSource();
-      taarSource.buffer = octaveBuffer;
+      taarSource.buffer = octavePair.nar;
       taarSource.loop = true;
-      taarSource.detune.setValueAtTime(-3.0, now);
+      taarSource.playbackRate.setValueAtTime(octaveRate, now);
+      taarSource.detune.setValueAtTime(-2.5, now);
 
       const taarGain = this.ctx.createGain();
       taarGain.gain.setValueAtTime(0.24, now);
@@ -186,13 +203,14 @@ export class HarmoniumAudioEngine {
       subGains,
       filter,
       gain: voiceGain,
+      targetGain,
       startedAt: now,
     });
   }
 
   public noteOff(midi: number): void {
     if (!this.ctx) return;
-    this.voiceManager.releaseVoice(this.ctx, midi, 0.14);
+    this.voiceManager.releaseVoice(this.ctx, midi, 0.16);
   }
 
   public releaseAllNotes(): void {
@@ -480,7 +498,6 @@ export class HarmoniumAudioEngine {
     if (!this.ctx || !this.masterGain || !this.dryGain || !this.wetGain) return;
 
     const now = this.ctx.currentTime;
-    // Decreased by ~10% from 1.38x -> 1.24x for clean, comfortable headroom
     const effectiveVolume = this.settings.muted
       ? 0
       : this.settings.volume * 1.24;
@@ -497,13 +514,6 @@ export class HarmoniumAudioEngine {
     this.syncDrone();
   }
 
-  /**
-   * 4-Stage Acoustic Harmonium Soundboard & Jali Filter Chain:
-   * 1. High-Pass @ 175 Hz -> Eliminates sub-bass rumble ("futta bass")
-   * 2. Peaking Cut @ 295 Hz (-3.5 dB) -> Removes boxy low-mid mud
-   * 3. Peaking Boost @ 780 Hz (+2.6 dB) -> Brings out sweet teakwood & brass reed warmth
-   * 4. Low-Pass Jali Filter @ 2450 Hz -> Smooths out top-end harshness
-   */
   private setupMasterChain(ctx: AudioContext): void {
     this.masterGain = ctx.createGain();
     this.dryGain = ctx.createGain();
@@ -511,39 +521,35 @@ export class HarmoniumAudioEngine {
     this.convolver = ctx.createConvolver();
     this.convolver.buffer = this.createRoomImpulse(ctx, 0.85, 3.4);
 
-    // Stage 1: Sub-bass cut (prevents speaker rattle / futta bass)
     const highpassFilter = ctx.createBiquadFilter();
     highpassFilter.type = "highpass";
     highpassFilter.frequency.setValueAtTime(175, ctx.currentTime);
     highpassFilter.Q.setValueAtTime(0.707, ctx.currentTime);
 
-    // Stage 2: Anti-mud cut around 295 Hz
     const antiMudEq = ctx.createBiquadFilter();
     antiMudEq.type = "peaking";
     antiMudEq.frequency.setValueAtTime(295, ctx.currentTime);
     antiMudEq.Q.setValueAtTime(1.4, ctx.currentTime);
     antiMudEq.gain.setValueAtTime(-3.5, ctx.currentTime);
 
-    // Stage 3: Teakwood soundboard vocal warmth around 780 Hz
     const soundboardWarmthEq = ctx.createBiquadFilter();
     soundboardWarmthEq.type = "peaking";
     soundboardWarmthEq.frequency.setValueAtTime(780, ctx.currentTime);
     soundboardWarmthEq.Q.setValueAtTime(1.1, ctx.currentTime);
     soundboardWarmthEq.gain.setValueAtTime(2.6, ctx.currentTime);
 
-    // Stage 4: Wooden Jali (grille) mellow roll-off at 2450 Hz
     const jaliMellowFilter = ctx.createBiquadFilter();
     jaliMellowFilter.type = "lowpass";
     jaliMellowFilter.frequency.setValueAtTime(2450, ctx.currentTime);
     jaliMellowFilter.Q.setValueAtTime(0.65, ctx.currentTime);
 
-    // Gentle transparent limiter (only catches extreme multi-key peaks)
+    // High-headroom safety limiter so chords never duck or pump the melody volume
     const compressor = ctx.createDynamicsCompressor();
-    compressor.threshold.setValueAtTime(-4, ctx.currentTime);
-    compressor.knee.setValueAtTime(10, ctx.currentTime);
-    compressor.ratio.setValueAtTime(3.5, ctx.currentTime);
-    compressor.attack.setValueAtTime(0.01, ctx.currentTime);
-    compressor.release.setValueAtTime(0.18, ctx.currentTime);
+    compressor.threshold.setValueAtTime(-2.5, ctx.currentTime);
+    compressor.knee.setValueAtTime(6, ctx.currentTime);
+    compressor.ratio.setValueAtTime(2.5, ctx.currentTime);
+    compressor.attack.setValueAtTime(0.015, ctx.currentTime);
+    compressor.release.setValueAtTime(0.2, ctx.currentTime);
 
     this.dryGain.connect(highpassFilter);
     this.wetGain.connect(this.convolver);
@@ -586,12 +592,14 @@ export class HarmoniumAudioEngine {
     return impulse;
   }
 
-  /**
-   * Uses the clean harmonium reed buffers for the Sa-Pa Shruti Box drone
-   * instead of raw sawtooth oscillators so the drone blends warmly.
-   */
   private syncDrone(): void {
     if (!this.ctx || !this.dryGain) return;
+
+    const nextDroneKey = `${this.settings.droneEnabled && !this.settings.muted}-${this.settings.tonic}`;
+    if (nextDroneKey === this.activeDroneStateKey) {
+      return; // Do not restart drone if tonic and enabled state haven't changed
+    }
+    this.activeDroneStateKey = nextDroneKey;
 
     for (const src of this.droneSources) {
       try {
@@ -614,11 +622,11 @@ export class HarmoniumAudioEngine {
     if (!this.settings.droneEnabled || this.settings.muted) return;
 
     const madhyaSaMidi = getTonicReferenceMidi(this.settings.tonic, 0);
-    const mandraPaMidi = madhyaSaMidi - 5; // Pa below Madhya Sa
+    const mandraPaMidi = madhyaSaMidi - 5;
 
     const droneGain = this.ctx.createGain();
     droneGain.gain.setValueAtTime(0.001, this.ctx.currentTime);
-    droneGain.gain.linearRampToValueAtTime(0.08, this.ctx.currentTime + 0.3);
+    droneGain.gain.linearRampToValueAtTime(0.075, this.ctx.currentTime + 0.3);
 
     const droneFilter = this.ctx.createBiquadFilter();
     droneFilter.type = "lowpass";
@@ -627,16 +635,24 @@ export class HarmoniumAudioEngine {
     droneGain.connect(droneFilter);
     droneFilter.connect(this.dryGain);
 
-    for (const [midi, detuneCents] of [
-      [mandraPaMidi, 0],
-      [madhyaSaMidi, 0],
-      [madhyaSaMidi, 5.5],
-    ] as const) {
-      const buf = this.sampleBank.getOrCreateBuffer(this.ctx, midi);
+    const saPair = this.sampleBank.getOrCreateReedPair(this.ctx, madhyaSaMidi);
+    const paPair = this.sampleBank.getOrCreateReedPair(this.ctx, mandraPaMidi);
+
+    const droneConfigs = [
+      { buf: paPair.nar, midi: mandraPaMidi, detune: 0 },
+      { buf: saPair.nar, midi: madhyaSaMidi, detune: 0 },
+      { buf: saPair.mada, midi: madhyaSaMidi, detune: 3.5 },
+    ];
+
+    for (const cfg of droneConfigs) {
       const src = this.ctx.createBufferSource();
-      src.buffer = buf;
+      src.buffer = cfg.buf;
       src.loop = true;
-      src.detune.setValueAtTime(detuneCents, this.ctx.currentTime);
+      src.playbackRate.setValueAtTime(
+        this.getExactPitchPlaybackRate(this.ctx, cfg.midi),
+        this.ctx.currentTime,
+      );
+      src.detune.setValueAtTime(cfg.detune, this.ctx.currentTime);
       src.connect(droneGain);
       src.start();
       this.droneSources.push(src);

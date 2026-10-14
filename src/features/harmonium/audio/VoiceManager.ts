@@ -4,6 +4,7 @@ export interface ActiveVoice {
   subGains: GainNode[];
   filter: BiquadFilterNode;
   gain: GainNode;
+  targetGain: number;
   startedAt: number;
 }
 
@@ -11,7 +12,7 @@ export class VoiceManager {
   private activeVoices = new Map<number, ActiveVoice>();
   private readonly maxPolyphony: number;
 
-  constructor(maxPolyphony = 12) {
+  constructor(maxPolyphony = 14) {
     this.maxPolyphony = maxPolyphony;
   }
 
@@ -24,8 +25,14 @@ export class VoiceManager {
   }
 
   public registerVoice(ctx: AudioContext, voice: ActiveVoice): void {
+    // If the same note is already playing, crossfade it out gently over 55ms so there is zero gap
     if (this.activeVoices.has(voice.midi)) {
-      this.releaseVoice(ctx, voice.midi, 0.045);
+      this.fadeOutAndDetachVoice(
+        ctx,
+        this.activeVoices.get(voice.midi)!,
+        0.055,
+      );
+      this.activeVoices.delete(voice.midi);
     }
 
     if (this.activeVoices.size >= this.maxPolyphony) {
@@ -38,7 +45,7 @@ export class VoiceManager {
         }
       }
       if (oldestMidi !== null) {
-        this.releaseVoice(ctx, oldestMidi, 0.05);
+        this.releaseVoice(ctx, oldestMidi, 0.06);
       }
     }
 
@@ -48,25 +55,37 @@ export class VoiceManager {
   public releaseVoice(
     ctx: AudioContext,
     midi: number,
-    releaseTimeSec = 0.14,
+    releaseTimeSec = 0.16,
   ): void {
     const voice = this.activeVoices.get(midi);
     if (!voice) return;
 
     this.activeVoices.delete(midi);
+    this.fadeOutAndDetachVoice(ctx, voice, releaseTimeSec);
+  }
+
+  private fadeOutAndDetachVoice(
+    ctx: AudioContext,
+    voice: ActiveVoice,
+    releaseTimeSec: number,
+  ): void {
     const now = ctx.currentTime;
 
     try {
       voice.gain.gain.cancelScheduledValues(now);
-      voice.gain.gain.setValueAtTime(
-        Math.max(0.0001, voice.gain.gain.value),
-        now,
+      const currentVal = Math.max(
+        0.0001,
+        voice.gain.gain.value || voice.targetGain,
       );
-      // Natural harmonium air-decay curve when the key valve closes
-      voice.gain.gain.setTargetAtTime(0.0001, now, releaseTimeSec * 0.32);
+      voice.gain.gain.setValueAtTime(currentVal, now);
+      // Smooth linear-to-exponential air valve release without sudden drop
+      voice.gain.gain.exponentialRampToValueAtTime(
+        0.0001,
+        now + releaseTimeSec,
+      );
 
       for (const src of voice.sources) {
-        src.stop(now + releaseTimeSec + 0.04);
+        src.stop(now + releaseTimeSec + 0.03);
       }
 
       window.setTimeout(
@@ -100,8 +119,10 @@ export class VoiceManager {
     const cutoff = 1500 + bellowsIntensity * 1400;
 
     for (const voice of this.activeVoices.values()) {
-      voice.gain.gain.setTargetAtTime(targetGain, now, 0.04);
-      voice.filter.frequency.setTargetAtTime(cutoff, now, 0.04);
+      voice.targetGain = targetGain;
+      voice.gain.gain.cancelScheduledValues(now);
+      voice.gain.gain.setTargetAtTime(targetGain, now, 0.05);
+      voice.filter.frequency.setTargetAtTime(cutoff, now, 0.05);
     }
   }
 
