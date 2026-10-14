@@ -46,6 +46,16 @@ function computeDeckLayout(deckKeys: KeyDescriptor[]): {
   return { whiteKeys, blackKeyPlacements };
 }
 
+function extractMidiFromTarget(
+  target: EventTarget | Element | null,
+): number | null {
+  if (!(target instanceof Element)) return null;
+  const keyEl = target.closest("[data-midi]");
+  if (!keyEl) return null;
+  const raw = keyEl.getAttribute("data-midi");
+  return raw ? Number(raw) : null;
+}
+
 export const HarmoniumKeyboard: React.FC<HarmoniumKeyboardProps> = ({
   tonic,
   octaveShift,
@@ -80,8 +90,6 @@ export const HarmoniumKeyboard: React.FC<HarmoniumKeyboardProps> = ({
     () => buildKeyboardKeys(octaveShift, tonic, 29),
     [octaveShift, tonic],
   );
-
-  // Split into Upper Deck (Madhya + Taar: 17 keys, C4..E5) and Lower Deck (Mandra: 12 keys, C3..B3)
   const lowerDeckKeys = useMemo(() => allKeys.slice(0, 12), [allKeys]);
   const upperDeckKeys = useMemo(() => allKeys.slice(12), [allKeys]);
 
@@ -98,6 +106,26 @@ export const HarmoniumKeyboard: React.FC<HarmoniumKeyboardProps> = ({
     el.scrollTo({ left: targetLeft, behavior: "smooth" });
   };
 
+  const handleBedPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    // Prevent mobile focus highlight, synthetic mouse click, and Android long-press selection
+    if (e.pointerType === "touch") {
+      e.preventDefault();
+    }
+    const midi = extractMidiFromTarget(e.target);
+    if (midi !== null) {
+      onPointerDownKey(e.pointerId, midi);
+    }
+  };
+
+  const handleBedPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.buttons === 0 && e.pressure === 0) return;
+    const elUnderFinger = document.elementFromPoint(e.clientX, e.clientY);
+    const midi = extractMidiFromTarget(elUnderFinger);
+    if (midi !== null) {
+      onPointerEnterKey(e.pointerId, midi);
+    }
+  };
+
   const renderKeyboardDeck = (
     deckKeys: KeyDescriptor[],
     deckLabel?: string,
@@ -109,7 +137,12 @@ export const HarmoniumKeyboard: React.FC<HarmoniumKeyboardProps> = ({
       <div className="keyboard-deck-wrapper">
         {deckLabel && <div className="deck-saptak-caption">{deckLabel}</div>}
         <div
-          className={`keyboard-bed ${isCompactDeck ? "keyboard-bed-stacked" : "keyboard-bed-single"}`}
+          className={`keyboard-bed ${
+            isCompactDeck ? "keyboard-bed-stacked" : "keyboard-bed-single"
+          }`}
+          onContextMenu={(e) => e.preventDefault()}
+          onPointerDown={handleBedPointerDown}
+          onPointerMove={handleBedPointerMove}
           onPointerUp={(e) => onPointerUpKey(e.pointerId)}
           onPointerCancel={(e) => onPointerUpKey(e.pointerId)}
           onPointerLeave={(e) => onPointerUpKey(e.pointerId)}
@@ -121,17 +154,14 @@ export const HarmoniumKeyboard: React.FC<HarmoniumKeyboardProps> = ({
               <button
                 key={k.midi}
                 type="button"
+                tabIndex={-1}
                 data-midi={k.midi}
                 aria-label={`Play ${k.westernName} (${k.swara.full})`}
                 aria-pressed={isActive}
-                className={`white-key ${isActive ? "active" : ""} ${isTarget ? "target-hint" : ""}`}
-                onPointerDown={(e) => {
-                  e.currentTarget.releasePointerCapture(e.pointerId);
-                  onPointerDownKey(e.pointerId, k.midi);
-                }}
-                onPointerEnter={(e) => {
-                  if (e.buttons > 0) onPointerEnterKey(e.pointerId, k.midi);
-                }}
+                className={`white-key ${isActive ? "active" : ""} ${
+                  isTarget ? "target-hint" : ""
+                }`}
+                onContextMenu={(e) => e.preventDefault()}
               >
                 {!isBelow830 && k.shortcutKey && (
                   <span className="key-shortcut-badge">{k.shortcutKey}</span>
@@ -155,19 +185,15 @@ export const HarmoniumKeyboard: React.FC<HarmoniumKeyboardProps> = ({
               <button
                 key={k.midi}
                 type="button"
+                tabIndex={-1}
                 data-midi={k.midi}
                 aria-label={`Play ${k.westernName} (${k.swara.full})`}
                 aria-pressed={isActive}
                 style={{ left: `${leftPercent}%`, width: `${widthPercent}%` }}
-                className={`black-key ${isActive ? "active" : ""} ${isTarget ? "target-hint" : ""}`}
-                onPointerDown={(e) => {
-                  e.stopPropagation();
-                  e.currentTarget.releasePointerCapture(e.pointerId);
-                  onPointerDownKey(e.pointerId, k.midi);
-                }}
-                onPointerEnter={(e) => {
-                  if (e.buttons > 0) onPointerEnterKey(e.pointerId, k.midi);
-                }}
+                className={`black-key ${isActive ? "active" : ""} ${
+                  isTarget ? "target-hint" : ""
+                }`}
+                onContextMenu={(e) => e.preventDefault()}
               >
                 {!isBelow830 && k.shortcutKey && (
                   <span className="key-shortcut-badge">{k.shortcutKey}</span>

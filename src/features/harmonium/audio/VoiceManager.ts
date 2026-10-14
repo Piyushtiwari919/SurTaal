@@ -1,6 +1,7 @@
 export interface ActiveVoice {
   midi: number;
-  source: AudioBufferSourceNode;
+  sources: AudioBufferSourceNode[];
+  subGains: GainNode[];
   filter: BiquadFilterNode;
   gain: GainNode;
   startedAt: number;
@@ -23,12 +24,10 @@ export class VoiceManager {
   }
 
   public registerVoice(ctx: AudioContext, voice: ActiveVoice): void {
-    // If same note is already playing, stop it cleanly first
     if (this.activeVoices.has(voice.midi)) {
-      this.releaseVoice(ctx, voice.midi, 0.04);
+      this.releaseVoice(ctx, voice.midi, 0.045);
     }
 
-    // Steal oldest voice if polyphony limit is reached
     if (this.activeVoices.size >= this.maxPolyphony) {
       let oldestMidi: number | null = null;
       let oldestTime = Infinity;
@@ -49,7 +48,7 @@ export class VoiceManager {
   public releaseVoice(
     ctx: AudioContext,
     midi: number,
-    releaseTimeSec = 0.11,
+    releaseTimeSec = 0.14,
   ): void {
     const voice = this.activeVoices.get(midi);
     if (!voice) return;
@@ -63,23 +62,29 @@ export class VoiceManager {
         Math.max(0.0001, voice.gain.gain.value),
         now,
       );
-      voice.gain.gain.exponentialRampToValueAtTime(
-        0.0001,
-        now + releaseTimeSec,
-      );
-      voice.source.stop(now + releaseTimeSec + 0.02);
+      // Natural harmonium air-decay curve when the key valve closes
+      voice.gain.gain.setTargetAtTime(0.0001, now, releaseTimeSec * 0.32);
+
+      for (const src of voice.sources) {
+        src.stop(now + releaseTimeSec + 0.04);
+      }
 
       window.setTimeout(
         () => {
           try {
-            voice.source.disconnect();
+            for (const src of voice.sources) {
+              src.disconnect();
+            }
+            for (const sg of voice.subGains) {
+              sg.disconnect();
+            }
             voice.filter.disconnect();
             voice.gain.disconnect();
           } catch {
             // Ignore already disconnected nodes
           }
         },
-        (releaseTimeSec + 0.06) * 1000,
+        (releaseTimeSec + 0.08) * 1000,
       );
     } catch {
       // Fallback cleanup if context is closed
@@ -91,8 +96,8 @@ export class VoiceManager {
     bellowsIntensity: number,
   ): void {
     const now = ctx.currentTime;
-    const targetGain = 0.12 + bellowsIntensity * 0.22;
-    const cutoff = 1200 + bellowsIntensity * 1800;
+    const targetGain = 0.18 + bellowsIntensity * 0.24;
+    const cutoff = 1500 + bellowsIntensity * 1400;
 
     for (const voice of this.activeVoices.values()) {
       voice.gain.gain.setTargetAtTime(targetGain, now, 0.04);
@@ -106,7 +111,7 @@ export class VoiceManager {
       return;
     }
     for (const midi of Array.from(this.activeVoices.keys())) {
-      this.releaseVoice(ctx, midi, 0.05);
+      this.releaseVoice(ctx, midi, 0.06);
     }
   }
 }

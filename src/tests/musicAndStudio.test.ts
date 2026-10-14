@@ -25,7 +25,7 @@ import {
 } from "../features/harmonium/keyboard/haptics";
 
 describe("Mobile Key Haptic Feedback", () => {
-  it("calls navigator.vibrate(10) on tap and throttles rapid calls within 25ms", () => {
+  it("calls navigator.vibrate(6) on tap, ignores slide, and throttles rapid calls within 60ms", () => {
     resetHapticThrottleForTests();
     const vibrateMock = vi.fn(() => true);
     Object.defineProperty(globalThis.navigator, "vibrate", {
@@ -34,20 +34,21 @@ describe("Mobile Key Haptic Feedback", () => {
       writable: true,
     });
 
-    // First tap at t = 100ms triggers 10ms vibration
+    // First tap at t = 100ms cancels queue (0) and triggers 6ms tick
     expect(triggerKeyHaptic(true, "tap", 100)).toBe(true);
-    expect(vibrateMock).toHaveBeenCalledWith(10);
+    expect(vibrateMock).toHaveBeenLastCalledWith(6);
 
-    // Second call 10ms later (t = 110ms) is throttled to prevent motor buzz
-    expect(triggerKeyHaptic(true, "slide", 110)).toBe(false);
-    expect(vibrateMock).toHaveBeenCalledTimes(1);
+    // Second tap 20ms later (t = 120ms) is throttled to prevent double-vibration
+    expect(triggerKeyHaptic(true, "tap", 120)).toBe(false);
 
-    // Call after 30ms (t = 135ms) triggers 5ms glissando slide pulse
-    expect(triggerKeyHaptic(true, "slide", 135)).toBe(true);
-    expect(vibrateMock).toHaveBeenLastCalledWith(5);
+    // Slide events never vibrate
+    expect(triggerKeyHaptic(true, "slide", 200)).toBe(false);
+
+    // Next tap after 60ms cooldown (t = 210ms) succeeds
+    expect(triggerKeyHaptic(true, "tap", 210)).toBe(true);
 
     // Disabled haptics never calls navigator.vibrate
-    expect(triggerKeyHaptic(false, "tap", 200)).toBe(false);
+    expect(triggerKeyHaptic(false, "tap", 300)).toBe(false);
   });
 });
 

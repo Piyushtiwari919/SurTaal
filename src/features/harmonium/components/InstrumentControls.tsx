@@ -2,7 +2,7 @@ import React from "react";
 import { HARMONIUM_TONIC_LABELS, PitchClass } from "../music/pitch";
 import { ReedMode } from "../music/tuning";
 import { UserPreferences } from "../../../storage/settingsRepository";
-import { isHapticsSupported, triggerKeyHaptic } from "../keyboard/haptics";
+import { isHapticsSupported } from "../keyboard/haptics";
 
 interface InstrumentControlsProps {
   prefs: UserPreferences;
@@ -166,13 +166,7 @@ export const InstrumentControls: React.FC<InstrumentControlsProps> = ({
                 ? "Toggle tactile vibration on key taps"
                 : "Vibration API is only supported on Android browsers"
             }
-            onClick={() => {
-              const next = !prefs.hapticsEnabled;
-              onChange({ hapticsEnabled: next });
-              if (next) {
-                triggerKeyHaptic(true, "tap");
-              }
-            }}
+            onClick={() => onChange({ hapticsEnabled: !prefs.hapticsEnabled })}
           >
             {prefs.hapticsEnabled ? "Haptics: ON" : "Haptics: OFF"}
           </button>

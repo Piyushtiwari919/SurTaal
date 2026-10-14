@@ -166,6 +166,25 @@ input {
   font-weight: 500;
 }
 
+/* Prevent mobile tap-highlight flash, text selection, and long-press popups on keys */
+.harmonium-cabinet,
+.keyboard-bed,
+.white-key,
+.black-key {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+  outline: none;
+}
+
+.white-key > span,
+.black-key > span {
+  pointer-events: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
 /* Harmonium Cabinet */
 .harmonium-cabinet {
   background: linear-gradient(180deg, var(--wood-frame), var(--wood-trim));
