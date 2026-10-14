@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Production build & PWA generated service workers
+dist/
+dist-ssr/
+dev-dist/
+*.local
+
+# Environment variable files (NEVER commit real .env files)
+.env
+.env.*
+!.env.example
+
+# Playwright & Vitest test artifacts
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+/coverage/
+
+# Editor & OS files
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# Deployment CLI folders
+.vercel
+.netlify
+.wrangler
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
