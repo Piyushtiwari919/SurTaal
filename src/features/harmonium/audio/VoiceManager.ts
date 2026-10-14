@@ -1,5 +1,6 @@
 export interface ActiveVoice {
   midi: number;
+  state: "held" | "releasing";
   sources: OscillatorNode[];
   subGains: GainNode[];
   filter: BiquadFilterNode;
@@ -7,123 +8,214 @@ export interface ActiveVoice {
   targetGain: number;
   attackDurationSec: number;
   startedAt: number;
+  releaseStartAt: number;
+  releaseStartGain: number;
+  releaseDurationSec: number;
+  cleanupTimerId: number | null;
 }
 
 export class VoiceManager {
-  private activeVoices = new Map<number, ActiveVoice>();
+  private voicesByMidi = new Map<number, ActiveVoice>();
   private readonly maxPolyphony: number;
 
-  constructor(maxPolyphony = 14) {
+  constructor(maxPolyphony = 16) {
     this.maxPolyphony = maxPolyphony;
   }
 
   public getActiveMidis(): number[] {
-    return Array.from(this.activeVoices.keys());
+    const held: number[] = [];
+    for (const [midi, v] of this.voicesByMidi.entries()) {
+      if (v.state === "held") held.push(midi);
+    }
+    return held;
   }
 
   public hasVoice(midi: number): boolean {
-    return this.activeVoices.has(midi);
+    const v = this.voicesByMidi.get(midi);
+    return v !== undefined && v.state === "held";
+  }
+
+  private estimateCurrentGain(voice: ActiveVoice, now: number): number {
+    if (voice.state === "held") {
+      const elapsed = Math.max(0, now - voice.startedAt);
+      if (elapsed < voice.attackDurationSec) {
+        return Math.max(
+          0.01,
+          voice.targetGain * (elapsed / voice.attackDurationSec),
+        );
+      }
+      return voice.targetGain;
+    } else {
+      const relElapsed = Math.max(0, now - voice.releaseStartAt);
+      const progress = Math.min(
+        1,
+        relElapsed / Math.max(0.02, voice.releaseDurationSec),
+      );
+      return Math.max(
+        0.002,
+        voice.releaseStartGain * Math.pow(1 - progress, 1.8),
+      );
+    }
+  }
+
+  public tryRetriggerExistingVoice(
+    ctx: AudioContext,
+    midi: number,
+    targetGain: number,
+    cutoffFreq: number,
+  ): boolean {
+    const existing = this.voicesByMidi.get(midi);
+    if (!existing) return false;
+
+    if (existing.cleanupTimerId !== null) {
+      window.clearTimeout(existing.cleanupTimerId);
+      existing.cleanupTimerId = null;
+    }
+
+    const now = ctx.currentTime;
+    const currentGain = this.estimateCurrentGain(existing, now);
+    const param = existing.gain.gain as AudioParam & {
+      cancelAndHoldAtTime?: (t: number) => AudioParam;
+    };
+
+    try {
+      if (typeof param.cancelAndHoldAtTime === "function") {
+        param.cancelAndHoldAtTime(now);
+      } else {
+        param.cancelScheduledValues(now);
+        param.setValueAtTime(currentGain, now);
+      }
+
+      param.linearRampToValueAtTime(targetGain, now + 0.012);
+      existing.filter.frequency.setTargetAtTime(cutoffFreq, now, 0.02);
+
+      existing.state = "held";
+      existing.targetGain = targetGain;
+      existing.attackDurationSec = 0.012;
+      existing.startedAt = now;
+      return true;
+    } catch {
+      this.forceDestroyVoice(existing, ctx);
+      this.voicesByMidi.delete(midi);
+      return false;
+    }
   }
 
   public registerVoice(ctx: AudioContext, voice: ActiveVoice): void {
-    // If the same note is re-pressed while still ringing, crossfade it smoothly over 80ms
-    const existing = this.activeVoices.get(voice.midi);
+    const existing = this.voicesByMidi.get(voice.midi);
     if (existing) {
-      this.fadeOutAndDetachVoice(ctx, existing, 0.08);
-      this.activeVoices.delete(voice.midi);
+      this.forceDestroyVoice(existing, ctx);
+      this.voicesByMidi.delete(voice.midi);
     }
 
-    if (this.activeVoices.size >= this.maxPolyphony) {
-      let oldestMidi: number | null = null;
+    if (this.voicesByMidi.size >= this.maxPolyphony) {
+      let victimMidi: number | null = null;
       let oldestTime = Infinity;
-      for (const [midi, active] of this.activeVoices.entries()) {
-        if (active.startedAt < oldestTime) {
-          oldestTime = active.startedAt;
-          oldestMidi = midi;
+
+      for (const [midi, v] of this.voicesByMidi.entries()) {
+        const sortTime =
+          v.state === "releasing" ? v.startedAt - 1000 : v.startedAt;
+        if (sortTime < oldestTime) {
+          oldestTime = sortTime;
+          victimMidi = midi;
         }
       }
-      if (oldestMidi !== null) {
-        this.releaseVoice(ctx, oldestMidi, 0.08);
+      if (victimMidi !== null) {
+        const victim = this.voicesByMidi.get(victimMidi);
+        if (victim) {
+          this.forceDestroyVoice(victim, ctx);
+          this.voicesByMidi.delete(victimMidi);
+        }
       }
     }
 
-    this.activeVoices.set(voice.midi, voice);
+    this.voicesByMidi.set(voice.midi, voice);
   }
 
   public releaseVoice(
     ctx: AudioContext,
     midi: number,
-    releaseTimeSec = 0.28,
+    releaseTimeSec = 0.22,
   ): void {
-    const voice = this.activeVoices.get(midi);
-    if (!voice) return;
+    const voice = this.voicesByMidi.get(midi);
+    if (!voice || voice.state === "releasing") return;
 
-    this.activeVoices.delete(midi);
-    this.fadeOutAndDetachVoice(ctx, voice, releaseTimeSec);
-  }
-
-  /**
-   * Simulates the physical Harmonium Bellows Air Reservoir on key release:
-   * 1. Computes exact current gain BEFORE canceling automation so gain never snaps to 0.0001.
-   * 2. Holds 70% of the reed body for the first 75ms (bridging finger transitions between notes).
-   * 3. Smoothly fades out the remaining air tail over the rest of releaseTimeSec.
-   */
-  private fadeOutAndDetachVoice(
-    ctx: AudioContext,
-    voice: ActiveVoice,
-    releaseTimeSec: number,
-  ): void {
     const now = ctx.currentTime;
-    const elapsed = Math.max(0, now - voice.startedAt);
+    const currentGain = this.estimateCurrentGain(voice, now);
 
-    // Compute exact current envelope value mathematically so cancelScheduledValues never zeros it out
-    const estimatedGain =
-      elapsed < voice.attackDurationSec
-        ? Math.max(0.02, voice.targetGain * (elapsed / voice.attackDurationSec))
-        : voice.targetGain;
+    voice.state = "releasing";
+    voice.releaseStartAt = now;
+    voice.releaseStartGain = currentGain;
+    voice.releaseDurationSec = releaseTimeSec;
 
     try {
       const param = voice.gain.gain as AudioParam & {
-        cancelAndHoldAtTime?: (time: number) => AudioParam;
+        cancelAndHoldAtTime?: (t: number) => AudioParam;
       };
 
       if (typeof param.cancelAndHoldAtTime === "function") {
         param.cancelAndHoldAtTime(now);
       } else {
         param.cancelScheduledValues(now);
-        param.setValueAtTime(estimatedGain, now);
+        param.setValueAtTime(currentGain, now);
       }
 
-      // Stage 1: Bellows Air-Reservoir Bridge (keeps note warm while finger moves to next key)
-      const bridgeTime = Math.min(0.075, releaseTimeSec * 0.35);
-      param.linearRampToValueAtTime(estimatedGain * 0.68, now + bridgeTime);
+      const bridgeTime = Math.min(0.065, releaseTimeSec * 0.35);
+      param.linearRampToValueAtTime(currentGain * 0.72, now + bridgeTime);
+      param.linearRampToValueAtTime(0.0001, now + releaseTimeSec);
 
-      // Stage 2: Smooth acoustic decay in wooden chamber
-      param.exponentialRampToValueAtTime(0.0008, now + releaseTimeSec);
-
-      for (const src of voice.sources) {
-        src.stop(now + releaseTimeSec + 0.03);
-      }
-
-      window.setTimeout(
+      voice.cleanupTimerId = window.setTimeout(
         () => {
-          try {
-            for (const src of voice.sources) {
-              src.disconnect();
-            }
-            for (const sg of voice.subGains) {
-              sg.disconnect();
-            }
-            voice.filter.disconnect();
-            voice.gain.disconnect();
-          } catch {
-            // Ignore already disconnected nodes
+          const latest = this.voicesByMidi.get(midi);
+          if (latest === voice && voice.state === "releasing") {
+            this.voicesByMidi.delete(midi);
+            this.forceDestroyVoice(voice);
           }
         },
-        (releaseTimeSec + 0.08) * 1000,
+        (releaseTimeSec + 0.05) * 1000,
       );
     } catch {
-      // Fallback cleanup if context is closed
+      this.voicesByMidi.delete(midi);
+      this.forceDestroyVoice(voice, ctx);
+    }
+  }
+
+  private forceDestroyVoice(voice: ActiveVoice, ctx?: AudioContext): void {
+    if (voice.cleanupTimerId !== null) {
+      window.clearTimeout(voice.cleanupTimerId);
+      voice.cleanupTimerId = null;
+    }
+
+    if (ctx) {
+      try {
+        const now = ctx.currentTime;
+        voice.gain.gain.cancelScheduledValues(now);
+        voice.gain.gain.setValueAtTime(0.0001, now);
+      } catch {
+        // Ignore if context is closed
+      }
+    }
+
+    for (const src of voice.sources) {
+      try {
+        src.stop();
+        src.disconnect();
+      } catch {
+        // Ignore already stopped
+      }
+    }
+    for (const sg of voice.subGains) {
+      try {
+        sg.disconnect();
+      } catch {
+        // Ignore
+      }
+    }
+    try {
+      voice.filter.disconnect();
+      voice.gain.disconnect();
+    } catch {
+      // Ignore
     }
   }
 
@@ -135,9 +227,11 @@ export class VoiceManager {
     const targetGain = 0.18 + bellowsIntensity * 0.24;
     const cutoff = 1500 + bellowsIntensity * 1400;
 
-    for (const voice of this.activeVoices.values()) {
-      // Only adjust notes that have completed their initial 18ms attack ramp
-      if (now - voice.startedAt > voice.attackDurationSec) {
+    for (const voice of this.voicesByMidi.values()) {
+      if (
+        voice.state === "held" &&
+        now - voice.startedAt > voice.attackDurationSec
+      ) {
         voice.targetGain = targetGain;
         voice.gain.gain.setTargetAtTime(targetGain, now, 0.05);
       }
@@ -147,10 +241,13 @@ export class VoiceManager {
 
   public releaseAll(ctx: AudioContext | null): void {
     if (!ctx) {
-      this.activeVoices.clear();
+      for (const v of this.voicesByMidi.values()) {
+        this.forceDestroyVoice(v);
+      }
+      this.voicesByMidi.clear();
       return;
     }
-    for (const midi of Array.from(this.activeVoices.keys())) {
+    for (const midi of Array.from(this.voicesByMidi.keys())) {
       this.releaseVoice(ctx, midi, 0.08);
     }
   }

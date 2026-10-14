@@ -13,8 +13,8 @@ export interface ReedWavePair {
 
 /**
  * Generates and caches native Web Audio PeriodicWave harmonic tables.
- * Because PeriodicWave is synthesized continuously in C++ by the browser's audio engine,
- * it has ZERO loop points, ZERO buffer wrap clicks, and ZERO phase dropouts.
+ * Preserves the exact Indian Palitana harmonium timbre while keeping the primary
+ * fundamental and octave anchored in the Nar reed so Mada shimmer never causes volume dips.
  */
 export class SampleBank {
   private waveCache = new Map<string, ReedWavePair>();
@@ -44,7 +44,6 @@ export class SampleBank {
   }
 
   public getOrCreateReedPair(ctx: AudioContext, midi: number): ReedWavePair {
-    // Group into 3 register zones (Mandra, Madhya, Taar) for key-tracked harmonic warmth
     const registerZone = midi < 55 ? "mandra" : midi < 66 ? "madhya" : "taar";
     const existing = this.waveCache.get(registerZone);
     if (existing) {
@@ -65,9 +64,9 @@ export class SampleBank {
     const highDamping =
       registerZone === "taar" ? 0.65 : registerZone === "madhya" ? 0.88 : 1.0;
 
-    // 1. Nar Reed (Male 8' Reed) - carries the solid, unbroken fundamental + woody harmonics
+    // 1. Nar Reed (Male 8' Reed) - carries the unbroken Indian harmonium tone
     const narHarmonics = [
-      0, // DC offset (index 0 must be 0)
+      0,
       fundamentalWeight,
       1.0,
       0.66,
@@ -80,19 +79,19 @@ export class SampleBank {
       0.01 * highDamping,
     ];
 
-    // 2. Mada Reed (Female 8' Celeste Reed) - reduced fundamental so it NEVER cancels out
-    // the Nar reed's fundamental pitch, providing pure, unbroken Indian harmonium shimmer
+    // 2. Mada Reed (Female 8' Celeste Reed) - zero fundamental (0) and gentle upper harmonics
+    // so it adds acoustic reed chorus without ever cancelling out the Nar reed's core body
     const madaHarmonics = [
       0,
-      fundamentalWeight * 0.25,
-      0.85,
-      0.72,
-      0.35 * highDamping,
-      0.26 * highDamping,
-      0.14 * highDamping,
-      0.03 * highDamping,
-      0.04 * highDamping,
-      0.015 * highDamping,
+      0,
+      0.35,
+      0.65,
+      0.45 * highDamping,
+      0.3 * highDamping,
+      0.18 * highDamping,
+      0.05 * highDamping,
+      0.05 * highDamping,
+      0.02 * highDamping,
       0.01 * highDamping,
     ];
 
@@ -100,13 +99,7 @@ export class SampleBank {
     const narImag = new Float32Array(narHarmonics);
 
     const madaReal = new Float32Array(madaHarmonics.length);
-    const madaImag = new Float32Array(madaHarmonics.length);
-    for (let i = 1; i < madaHarmonics.length; i++) {
-      // Orthogonal cosine/sine split prevents destructive phase cancellation with Nar
-      const angle = i % 2 === 0 ? Math.PI * 0.25 : -Math.PI * 0.25;
-      madaReal[i] = madaHarmonics[i] * Math.cos(angle);
-      madaImag[i] = madaHarmonics[i] * Math.sin(angle);
-    }
+    const madaImag = new Float32Array(madaHarmonics);
 
     const nar = ctx.createPeriodicWave(narReal, narImag, {
       disableNormalization: false,
