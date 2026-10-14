@@ -1,47 +1,48 @@
-import { midiToFrequency } from '../music/pitch';
-import { ReedMode } from '../music/tuning';
+import { midiToFrequency } from "../music/pitch";
+import { ReedMode } from "../music/tuning";
 
 export interface SampleBankStatus {
-  mode: 'sampled' | 'synthesized-reed-bank';
+  mode: "sampled" | "synthesized-reed-bank";
   loadedCount: number;
   error?: string;
 }
 
-/**
- * Manages decoded AudioBuffers for harmonium notes.
- * Attempts to load optional local WAV samples from /audio/harmonium/ first;
- * seamlessly synthesizes and caches realistic multi-reed wave buffers offline
- * so the instrument works with zero network latency and full offline support.
- */
 export class SampleBank {
   private bufferCache = new Map<string, AudioBuffer>();
-  private status: SampleBankStatus = { mode: 'synthesized-reed-bank', loadedCount: 0 };
+  private status: SampleBankStatus = {
+    mode: "synthesized-reed-bank",
+    loadedCount: 0,
+  };
 
   public getStatus(): SampleBankStatus {
     return this.status;
   }
 
-  public async warmUp(ctx: AudioContext, midiNotes: number[], reedMode: ReedMode): Promise<SampleBankStatus> {
-    let loadedSamples = 0;
-
-    // Pre-generate cached seamless loop buffers for immediate zero-allocation playback
+  public async warmUp(
+    ctx: AudioContext,
+    midiNotes: number[],
+    reedMode: ReedMode,
+  ): Promise<SampleBankStatus> {
     for (const midi of midiNotes) {
       const key = `${midi}-${reedMode}`;
       if (!this.bufferCache.has(key)) {
         const buffer = this.buildHarmoniumReedBuffer(ctx, midi, reedMode);
         this.bufferCache.set(key, buffer);
-        loadedSamples++;
       }
     }
 
     this.status = {
-      mode: 'synthesized-reed-bank',
-      loadedCount: this.bufferCache.size
+      mode: "synthesized-reed-bank",
+      loadedCount: this.bufferCache.size,
     };
     return this.status;
   }
 
-  public getOrCreateBuffer(ctx: AudioContext, midi: number, reedMode: ReedMode): AudioBuffer {
+  public getOrCreateBuffer(
+    ctx: AudioContext,
+    midi: number,
+    reedMode: ReedMode,
+  ): AudioBuffer {
     const key = `${midi}-${reedMode}`;
     const existing = this.bufferCache.get(key);
     if (existing) {
@@ -53,22 +54,30 @@ export class SampleBank {
   }
 
   /**
-   * Generates a phase-aligned looping buffer modeling free-reed brass harmonics
-   * with Nar (8' base), Mada (8' slightly detuned celeste), and Kharaj/Taar (4'/16') reeds.
+   * Synthesizes a realistic Indian brass free-reed waveform with:
+   * - Asymmetric free-reed harmonic weights (strong 1st, 2nd, 3rd, 4th, 5th harmonics)
+   * - Acoustic beating between Nar (base 8' reed) and Mada (slightly sharp 8' celeste reed)
+   * - Warm wooden chamber resonance and 0.92 full-scale peak normalization
    */
-  private buildHarmoniumReedBuffer(ctx: AudioContext, midi: number, reedMode: ReedMode): AudioBuffer {
+  private buildHarmoniumReedBuffer(
+    ctx: AudioContext,
+    midi: number,
+    reedMode: ReedMode,
+  ): AudioBuffer {
     const sampleRate = ctx.sampleRate;
     const freq = midiToFrequency(midi);
-    // Exact integer number of cycles for click-free looping (~1.5 seconds)
-    const numCycles = Math.max(20, Math.round(freq * 1.5));
+    const numCycles = Math.max(28, Math.round(freq * 1.8));
     const durationSeconds = numCycles / freq;
-    const length = Math.max(1024, Math.floor(sampleRate * durationSeconds));
+    const length = Math.max(2048, Math.floor(sampleRate * durationSeconds));
     const buffer = ctx.createBuffer(1, length, sampleRate);
     const data = buffer.getChannelData(0);
 
-    // Harmonic amplitude profile of a brass free-reed inside a wooden chamber
-    const harmonics = [1.0, 0.68, 0.42, 0.25, 0.16, 0.11, 0.07, 0.04, 0.025, 0.012];
-    const nyquist = sampleRate * 0.45;
+    // Authentic Indian brass free-reed harmonic spectrum (strong odd & even harmonics up to 12th)
+    const harmonics = [
+      1.0, 0.88, 0.64, 0.42, 0.31, 0.22, 0.15, 0.1, 0.065, 0.04, 0.025, 0.015,
+    ];
+    const nyquist = sampleRate * 0.44;
+    let maxPeak = 0.0001;
 
     for (let i = 0; i < length; i++) {
       const t = i / sampleRate;
@@ -79,25 +88,52 @@ export class SampleBank {
         const hFreq = freq * harmonicNumber;
         if (hFreq >= nyquist) break;
 
-        const amp = harmonics[h];
-        // Main 8' Reed (Nar)
-        sample += amp * Math.sin(2 * Math.PI * hFreq * t);
+        // Acoustic wood-body formant emphasis around 350Hz - 1200Hz
+        const formantWeight =
+          hFreq >= 300 && hFreq <= 1350 ? 1.28 : hFreq > 2600 ? 0.65 : 1.0;
+        const amp = harmonics[h] * formantWeight;
+        const phaseOffset = (harmonicNumber * 0.47) % (2 * Math.PI);
 
-        // Second 8' Celeste Reed (Mada) - slight acoustic warmth
-        if (reedMode === 'double' || reedMode === 'triple') {
+        // 1. Primary 8' Brass Reed (Nar)
+        sample += amp * Math.sin(2 * Math.PI * hFreq * t + phaseOffset);
+
+        // 2. Secondary 8' Celeste Reed (Mada) - warm natural acoustic chorus
+        if (reedMode === "double" || reedMode === "triple") {
           const detunedCycles = numCycles + (harmonicNumber % 2 === 0 ? 1 : -1);
-          const detunedFreq = (detunedCycles / durationSeconds) * harmonicNumber;
-          sample += amp * 0.62 * Math.sin(2 * Math.PI * detunedFreq * t + 0.3);
+          const detunedFreq =
+            (detunedCycles / durationSeconds) * harmonicNumber;
+          sample +=
+            amp *
+            0.78 *
+            Math.sin(2 * Math.PI * detunedFreq * t + phaseOffset + 0.35);
         }
 
-        // Third 4' Octave Reed for Triple-Reed rich mode
-        if (reedMode === 'triple' && hFreq * 2 < nyquist) {
-          sample += amp * 0.35 * Math.sin(2 * Math.PI * (hFreq * 2) * t + 0.7);
+        // 3. Sub-octave Kharaj (16') + Upper Octave (4') in Triple-Reed Organ mode
+        if (reedMode === "triple") {
+          if (harmonicNumber <= 6) {
+            const subFreq = freq * 0.5 * harmonicNumber;
+            sample += amp * 0.42 * Math.sin(2 * Math.PI * subFreq * t + 0.2);
+          }
+          if (hFreq * 2 < nyquist && harmonicNumber <= 6) {
+            sample +=
+              amp * 0.32 * Math.sin(2 * Math.PI * (hFreq * 2) * t + 0.6);
+          }
         }
       }
 
-      // Subtle wooden cabinet saturation (soft tanh curve)
-      data[i] = Math.tanh(sample * 0.42);
+      // Gentle asymmetric reed-valve saturation
+      const shaped = Math.tanh(sample * 0.55 + 0.04) - Math.tanh(0.04);
+      data[i] = shaped;
+      const absVal = Math.abs(shaped);
+      if (absVal > maxPeak) {
+        maxPeak = absVal;
+      }
+    }
+
+    // Normalize buffer to 0.92 peak so every note has full, consistent presence
+    const normFactor = 0.92 / maxPeak;
+    for (let i = 0; i < length; i++) {
+      data[i] *= normFactor;
     }
 
     return buffer;

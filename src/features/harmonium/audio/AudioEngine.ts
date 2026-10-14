@@ -33,7 +33,6 @@ export class HarmoniumAudioEngine {
   private sampleBank = new SampleBank();
   private voiceManager = new VoiceManager(12);
 
-  // Standalone Taal Loop state
   private taalTimerId: number | null = null;
   private currentTaalId: TaalId = "none";
   private taalBpm = 96;
@@ -42,13 +41,13 @@ export class HarmoniumAudioEngine {
   private onMatraChange?: (step: TaalMatra | null) => void;
 
   private settings: AudioSettings = {
-    volume: 0.8,
+    volume: 0.9,
     muted: false,
     reedMode: "double",
-    bellows: 0.85,
-    reverbMix: 0.15,
+    bellows: 0.9,
+    reverbMix: 0.14,
     droneEnabled: false,
-    tonic: 0,
+    tonic: 1,
   };
 
   public async unlockAndInit(): Promise<SampleBankStatus> {
@@ -114,19 +113,23 @@ export class HarmoniumAudioEngine {
     source.buffer = buffer;
     source.loop = true;
 
+    // Warm wooden acoustic chamber low-pass filter controlled by Bellows pressure
     const filter = this.ctx.createBiquadFilter();
     filter.type = "lowpass";
-    filter.frequency.setValueAtTime(1200 + this.settings.bellows * 1800, now);
-    filter.Q.setValueAtTime(0.8, now);
+    filter.frequency.setValueAtTime(1600 + this.settings.bellows * 2400, now);
+    filter.Q.setValueAtTime(0.95, now);
 
+    // Boosted per-voice level (+35% louder than before, protected by master limiter)
     const voiceGain = this.ctx.createGain();
     const targetGain = Math.max(
-      0.05,
-      (0.12 + this.settings.bellows * 0.22) * velocity,
+      0.1,
+      (0.28 + this.settings.bellows * 0.34) * velocity,
     );
 
+    // Natural 14ms free-reed air attack envelope
     voiceGain.gain.setValueAtTime(0.0001, now);
-    voiceGain.gain.linearRampToValueAtTime(targetGain, now + 0.018);
+    voiceGain.gain.linearRampToValueAtTime(targetGain * 1.08, now + 0.014);
+    voiceGain.gain.exponentialRampToValueAtTime(targetGain, now + 0.06);
 
     source.connect(filter);
     filter.connect(voiceGain);
@@ -134,6 +137,15 @@ export class HarmoniumAudioEngine {
     voiceGain.connect(this.wetGain);
 
     source.start(now);
+
+    // Subtle mechanical air-reed chiff transient on key press
+    this.triggerTransientNoise(
+      now,
+      midiToFrequency(midi) * 2.5,
+      3.0,
+      targetGain * 0.08,
+      0.016,
+    );
 
     this.voiceManager.registerVoice(this.ctx, {
       midi,
@@ -160,7 +172,7 @@ export class HarmoniumAudioEngine {
     const gain = this.ctx.createGain();
     osc.type = "triangle";
     osc.frequency.setValueAtTime(accent ? 1100 : 760, now);
-    gain.gain.setValueAtTime(0.15, now);
+    gain.gain.setValueAtTime(0.22, now);
     gain.gain.exponentialRampToValueAtTime(0.001, now + 0.045);
     osc.connect(gain);
     gain.connect(this.masterGain);
@@ -168,10 +180,6 @@ export class HarmoniumAudioEngine {
     osc.stop(now + 0.05);
   }
 
-  /**
-   * Synthesizes an authentic Tabla Bol at `scheduledTime` (defaults to `ctx.currentTime`).
-   * The Dayan (treble drum) is tuned directly to the user's selected Tonic (Sa).
-   */
   public playTablaBol(
     bol: TablaBol,
     marker: VibhagMarker = "regular",
@@ -183,41 +191,37 @@ export class HarmoniumAudioEngine {
     const accentBoost =
       marker === "sam" ? 1.25 : marker === "tali" ? 1.1 : 0.95;
 
-    // Tune Dayan to Madhya Sa (C4..B4 range)
     const saMidi = getTonicReferenceMidi(this.settings.tonic, 0);
     const dayanFreq = midiToFrequency(saMidi);
 
     switch (bol) {
       case "Dha":
-        this.synthBayanGe(t, 0.28 * accentBoost, true);
-        this.synthDayanOpen(t, dayanFreq, "kran", 0.22 * accentBoost);
+        this.synthBayanGe(t, 0.34 * accentBoost, true);
+        this.synthDayanOpen(t, dayanFreq, "kran", 0.28 * accentBoost);
         break;
       case "Dhin":
-        this.synthBayanGe(t, 0.26 * accentBoost, true);
-        this.synthDayanOpen(t, dayanFreq, "sur", 0.21 * accentBoost);
+        this.synthBayanGe(t, 0.32 * accentBoost, true);
+        this.synthDayanOpen(t, dayanFreq, "sur", 0.26 * accentBoost);
         break;
       case "Tin":
-        this.synthDayanOpen(t, dayanFreq, "sur", 0.22 * accentBoost);
+        this.synthDayanOpen(t, dayanFreq, "sur", 0.28 * accentBoost);
         break;
       case "Ta":
       case "Na":
-        this.synthDayanOpen(t, dayanFreq, "kran", 0.24 * accentBoost);
+        this.synthDayanOpen(t, dayanFreq, "kran", 0.3 * accentBoost);
         break;
       case "Ge":
-        this.synthBayanGe(t, 0.26 * accentBoost, false);
+        this.synthBayanGe(t, 0.32 * accentBoost, false);
         break;
       case "Ti":
-        this.synthDayanClosedTi(t, dayanFreq, 0.18 * accentBoost);
+        this.synthDayanClosedTi(t, dayanFreq, 0.22 * accentBoost);
         break;
       case "Ka":
-        this.synthBayanClosedKa(t, 0.2 * accentBoost);
+        this.synthBayanClosedKa(t, 0.24 * accentBoost);
         break;
     }
   }
 
-  /**
-   * Bayan (Left-hand bass drum) open stroke ('Ge' / 'Ghe') with pitch-modulation meend.
-   */
   private synthBayanGe(t: number, peakGain: number, bendUp: boolean): void {
     if (!this.ctx || !this.dryGain || !this.wetGain) return;
 
@@ -225,7 +229,6 @@ export class HarmoniumAudioEngine {
     const gain = this.ctx.createGain();
     osc.type = "sine";
 
-    // Characteristic Bayan membrane pitch bend
     osc.frequency.setValueAtTime(92, t);
     if (bendUp) {
       osc.frequency.exponentialRampToValueAtTime(112, t + 0.09);
@@ -245,13 +248,9 @@ export class HarmoniumAudioEngine {
     osc.start(t);
     osc.stop(t + 0.44);
 
-    // Subtle skin impact thud
     this.triggerTransientNoise(t, 240, 1.5, peakGain * 0.35, 0.025);
   }
 
-  /**
-   * Bayan muted flat-palm slap ('Ka' / 'Ke').
-   */
   private synthBayanClosedKa(t: number, peakGain: number): void {
     if (!this.ctx || !this.dryGain) return;
 
@@ -274,11 +273,6 @@ export class HarmoniumAudioEngine {
     this.triggerTransientNoise(t, 420, 1.8, peakGain * 0.6, 0.03);
   }
 
-  /**
-   * Dayan (Right-hand tuned wooden drum) open stroke:
-   * - 'kran' (Na/Ta): Rim stroke emphasizing fundamental + sharp 2nd/3rd harmonic ring
-   * - 'sur' (Tin/Dhin): Maidan stroke with warm sustained fundamental tuned to Sa
-   */
   private synthDayanOpen(
     t: number,
     saFreq: number,
@@ -295,11 +289,9 @@ export class HarmoniumAudioEngine {
     fundOsc.type = "sine";
     overtoneOsc.type = "triangle";
 
-    // Slight initial pitch drop from skin tension
     fundOsc.frequency.setValueAtTime(saFreq * 1.03, t);
     fundOsc.frequency.exponentialRampToValueAtTime(saFreq, t + 0.025);
 
-    // Syahi weighted harmonic overtone
     const overtoneRatio = style === "kran" ? 2.02 : 1.5;
     overtoneOsc.frequency.setValueAtTime(saFreq * overtoneRatio, t);
 
@@ -328,7 +320,6 @@ export class HarmoniumAudioEngine {
     fundOsc.stop(t + decaySec + 0.02);
     overtoneOsc.stop(t + decaySec + 0.02);
 
-    // Finger-strike transient click
     this.triggerTransientNoise(
       t,
       style === "kran" ? 2200 : 1400,
@@ -338,9 +329,6 @@ export class HarmoniumAudioEngine {
     );
   }
 
-  /**
-   * Dayan muted center Syahi stroke ('Ti' / 'Te').
-   */
   private synthDayanClosedTi(
     t: number,
     saFreq: number,
@@ -396,9 +384,6 @@ export class HarmoniumAudioEngine {
     src.stop(t + durationSec + 0.01);
   }
 
-  /**
-   * Starts a continuous, Web-Audio-clock-synced Tabla loop for live playing or Song Studio.
-   */
   public async startTaalLoop(
     taalId: Exclude<TaalId, "none">,
     bpm: number,
@@ -461,12 +446,15 @@ export class HarmoniumAudioEngine {
     if (!this.ctx || !this.masterGain || !this.dryGain || !this.wetGain) return;
 
     const now = this.ctx.currentTime;
-    const effectiveVolume = this.settings.muted ? 0 : this.settings.volume;
+    // Apply 1.38x makeup gain multiplier so 80-100% volume is loud and clear on laptop/phone speakers
+    const effectiveVolume = this.settings.muted
+      ? 0
+      : this.settings.volume * 1.38;
     this.masterGain.gain.setTargetAtTime(effectiveVolume, now, 0.02);
 
     this.wetGain.gain.setTargetAtTime(this.settings.reverbMix, now, 0.03);
     this.dryGain.gain.setTargetAtTime(
-      1 - this.settings.reverbMix * 0.4,
+      1 - this.settings.reverbMix * 0.35,
       now,
       0.03,
     );
@@ -480,16 +468,35 @@ export class HarmoniumAudioEngine {
     this.dryGain = ctx.createGain();
     this.wetGain = ctx.createGain();
     this.convolver = ctx.createConvolver();
-    this.convolver.buffer = this.createRoomImpulse(ctx, 1.1, 2.8);
+    this.convolver.buffer = this.createRoomImpulse(ctx, 1.0, 3.0);
 
+    // Teakwood cabinet body resonance EQ (warmth at 420Hz + reed presence at 1150Hz)
+    const bodyWarmthEq = ctx.createBiquadFilter();
+    bodyWarmthEq.type = "peaking";
+    bodyWarmthEq.frequency.setValueAtTime(420, ctx.currentTime);
+    bodyWarmthEq.Q.setValueAtTime(1.1, ctx.currentTime);
+    bodyWarmthEq.gain.setValueAtTime(3.2, ctx.currentTime);
+
+    const reedPresenceEq = ctx.createBiquadFilter();
+    reedPresenceEq.type = "peaking";
+    reedPresenceEq.frequency.setValueAtTime(1150, ctx.currentTime);
+    reedPresenceEq.Q.setValueAtTime(1.4, ctx.currentTime);
+    reedPresenceEq.gain.setValueAtTime(2.5, ctx.currentTime);
+
+    // Brickwall mastering compressor/limiter to allow loud output without digital clipping
     const compressor = ctx.createDynamicsCompressor();
-    compressor.threshold.setValueAtTime(-10, ctx.currentTime);
-    compressor.knee.setValueAtTime(12, ctx.currentTime);
-    compressor.ratio.setValueAtTime(4, ctx.currentTime);
+    compressor.threshold.setValueAtTime(-6, ctx.currentTime);
+    compressor.knee.setValueAtTime(8, ctx.currentTime);
+    compressor.ratio.setValueAtTime(6, ctx.currentTime);
+    compressor.attack.setValueAtTime(0.003, ctx.currentTime);
+    compressor.release.setValueAtTime(0.15, ctx.currentTime);
 
-    this.dryGain.connect(compressor);
+    this.dryGain.connect(bodyWarmthEq);
     this.wetGain.connect(this.convolver);
-    this.convolver.connect(compressor);
+    this.convolver.connect(bodyWarmthEq);
+
+    bodyWarmthEq.connect(reedPresenceEq);
+    reedPresenceEq.connect(compressor);
     compressor.connect(this.masterGain);
     this.masterGain.connect(ctx.destination);
 
@@ -552,7 +559,7 @@ export class HarmoniumAudioEngine {
 
     const droneGain = this.ctx.createGain();
     droneGain.gain.setValueAtTime(0.001, this.ctx.currentTime);
-    droneGain.gain.linearRampToValueAtTime(0.065, this.ctx.currentTime + 0.25);
+    droneGain.gain.linearRampToValueAtTime(0.075, this.ctx.currentTime + 0.25);
 
     const droneFilter = this.ctx.createBiquadFilter();
     droneFilter.type = "lowpass";

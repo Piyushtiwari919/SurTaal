@@ -1,19 +1,14 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { audioEngine } from "../features/harmonium/audio/AudioEngine";
 import { UnifiedInputController } from "../features/harmonium/keyboard/InputController";
+import { triggerKeyHaptic } from "../features/harmonium/keyboard/haptics";
 import { HarmoniumKeyboard } from "../features/harmonium/components/HarmoniumKeyboard";
 import { InstrumentControls } from "../features/harmonium/components/InstrumentControls";
 import { KeyMapModal } from "../features/harmonium/components/KeyMapModal";
 import { LearnMode } from "../features/learn/LearnMode";
-import type { PracticeExercise } from "../features/learn/practiceData";
-import { triggerKeyHaptic } from "../features/harmonium/keyboard/haptics";
+import { PracticeExercise } from "../features/learn/practiceData";
 import { SongStudio } from "../features/studio/SongStudio";
 import { Composition } from "../features/studio/compositionTypes";
-import {
-  getTaalMatra,
-  TaalId,
-  TaalMatra,
-} from "../features/harmonium/music/taal";
 import { MelodyRecorder } from "../features/studio/recording";
 import { CompositionPlayer } from "../features/studio/playback";
 import {
@@ -26,11 +21,19 @@ import {
   ThemeId,
   UserPreferences,
 } from "../storage/settingsRepository";
-import { midiToWesternName } from "../features/harmonium/music/pitch";
+import {
+  HARMONIUM_TONIC_LABELS,
+  midiToWesternName,
+} from "../features/harmonium/music/pitch";
 import {
   midiToSwara,
   relativeOffsetToMidi,
 } from "../features/harmonium/music/swara";
+import {
+  getTaalMatra,
+  TaalId,
+  TaalMatra,
+} from "../features/harmonium/music/taal";
 
 type AppMode = "play" | "learn" | "studio";
 
@@ -44,8 +47,8 @@ export const App: React.FC = () => {
     null,
   );
   const [showKeyMap, setShowKeyMap] = useState<boolean>(false);
+  const [mobileControlsOpen, setMobileControlsOpen] = useState<boolean>(false);
 
-  // Song Studio states
   const [activeComposition, setActiveComposition] = useState<Composition>(
     STARTER_DEMO_COMPOSITION,
   );
@@ -58,13 +61,13 @@ export const App: React.FC = () => {
   const [isPaused, setIsPaused] = useState<boolean>(false);
   const [loopEnabled, setLoopEnabled] = useState<boolean>(false);
   const [metronomeEnabled, setMetronomeEnabled] = useState<boolean>(false);
+  const [selectedTaal, setSelectedTaal] = useState<TaalId>("none");
+  const [currentMatra, setCurrentMatra] = useState<TaalMatra | null>(null);
   const [progressMs, setProgressMs] = useState<number>(0);
   const [totalMs, setTotalMs] = useState<number>(0);
   const [currentPlayingNoteId, setCurrentPlayingNoteId] = useState<
     string | null
   >(null);
-  const [selectedTaal, setSelectedTaal] = useState<TaalId>("none");
-  const [currentMatra, setCurrentMatra] = useState<TaalMatra | null>(null);
 
   const recorderRef = useRef(new MelodyRecorder());
   const playerRef = useRef(new CompositionPlayer());
@@ -74,7 +77,6 @@ export const App: React.FC = () => {
     hapticsEnabledRef.current = prefs.hapticsEnabled;
   }, [prefs.hapticsEnabled]);
 
-  // Apply theme attribute to document root
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", prefs.theme);
     savePreferences(prefs);
@@ -92,6 +94,10 @@ export const App: React.FC = () => {
   useEffect(() => {
     void compositionRepository.listAll().then(setSavedCompositions);
   }, []);
+
+  useEffect(() => {
+    audioEngine.setTaalBpm(activeComposition.bpm);
+  }, [activeComposition.bpm]);
 
   const handleNoteOn = useCallback((midi: number) => {
     if (!audioEngine.isReady()) {
@@ -149,10 +155,6 @@ export const App: React.FC = () => {
   }, [prefs.octaveShift]);
 
   useEffect(() => {
-    audioEngine.setTaalBpm(activeComposition.bpm);
-  }, [activeComposition.bpm]);
-
-  useEffect(() => {
     const controller = inputControllerRef.current!;
     const onVisibility = () => {
       if (document.hidden) controller.panicReleaseAll();
@@ -177,6 +179,7 @@ export const App: React.FC = () => {
     compToPlay = activeComposition,
     bpmOverride?: number,
   ) => {
+    audioEngine.stopTaalLoop();
     void audioEngine.unlockAndInit().then(() => {
       setAudioUnlocked(true);
       setIsPlaying(true);
@@ -185,7 +188,7 @@ export const App: React.FC = () => {
         compToPlay,
         {
           loop: loopEnabled,
-          metronome: metronomeEnabled,
+          metronome: metronomeEnabled || selectedTaal !== "none",
           playbackBpm: bpmOverride ?? compToPlay.bpm,
         },
         {
@@ -237,7 +240,7 @@ export const App: React.FC = () => {
         relativeOffset: step.offset,
         startTimeMs: cursorMs,
         durationMs,
-        velocity: 0.9,
+        velocity: 0.95,
       };
       cursorMs += Math.round(step.durationBeats * beatMs);
       return ev;
@@ -272,12 +275,16 @@ export const App: React.FC = () => {
           <div>
             <h1 className="brand-title">SurTaal</h1>
             <p className="brand-tagline">
-              Your little corner of music • Pocket Harmonium
+              Pocket Harmonium • Sa: {HARMONIUM_TONIC_LABELS[prefs.tonic]}
             </p>
           </div>
         </div>
 
-        <nav className="mode-tabs" aria-label="Application Modes">
+        {/* Desktop Mode Switcher (hidden on mobile in favor of fixed Bottom Nav) */}
+        <nav
+          className="mode-tabs desktop-only-nav"
+          aria-label="Application Modes"
+        >
           <button
             type="button"
             className={`mode-tab ${mode === "play" ? "active" : ""}`}
@@ -301,34 +308,36 @@ export const App: React.FC = () => {
           </button>
         </nav>
 
-        <div
-          style={{
-            display: "flex",
-            gap: "0.45rem",
-            alignItems: "center",
-            flexWrap: "wrap",
-          }}
-        >
+        <div className="header-actions">
+          <button
+            type="button"
+            className={`btn-secondary mobile-tune-toggle ${mobileControlsOpen ? "active" : ""}`}
+            aria-expanded={mobileControlsOpen}
+            onClick={() => setMobileControlsOpen((o) => !o)}
+          >
+            {mobileControlsOpen ? "Hide Controls ▲" : "Tune & Sound ⚙️"}
+          </button>
+
           <select
             aria-label="Select Visual Theme"
-            className="control-input"
+            className="control-input theme-select-compact"
             value={prefs.theme}
             onChange={(e) =>
               updatePreferences({ theme: e.target.value as ThemeId })
             }
           >
-            <option value="classic-ivory">Theme: Classic Ivory</option>
-            <option value="peacock">Theme: Peacock</option>
-            <option value="midnight-riyaaz">Theme: Midnight Riyaaz</option>
-            <option value="sunset-mehfil">Theme: Sunset Mehfil</option>
+            <option value="classic-ivory">Classic Ivory</option>
+            <option value="peacock">Peacock</option>
+            <option value="midnight-riyaaz">Midnight Riyaaz</option>
+            <option value="sunset-mehfil">Sunset Mehfil</option>
           </select>
 
           <button
             type="button"
-            className="btn-secondary"
+            className="btn-secondary desktop-only-btn"
             onClick={() => setShowKeyMap((s) => !s)}
           >
-            Key Map
+            PC Keys
           </button>
 
           <button
@@ -336,14 +345,17 @@ export const App: React.FC = () => {
             className="btn-primary"
             onClick={() => handlePlayComposition(STARTER_DEMO_COMPOSITION)}
           >
-            Play Demo Tune
+            Demo
           </button>
         </div>
       </header>
 
       <KeyMapModal open={showKeyMap} onClose={() => setShowKeyMap(false)} />
 
-      <InstrumentControls prefs={prefs} onChange={updatePreferences} />
+      {/* Collapsible on mobile so the harmonium keyboard stays front-and-center */}
+      <div className={`controls-drawer ${mobileControlsOpen ? "open" : ""}`}>
+        <InstrumentControls prefs={prefs} onChange={updatePreferences} />
+      </div>
 
       <main className="harmonium-cabinet">
         <div className="cabinet-status-strip">
@@ -359,24 +371,16 @@ export const App: React.FC = () => {
               </>
             ) : (
               <span>
-                Press or tap any key (or A–L on your keyboard) to begin playing
+                Tap keys or press Z–M / A–L on PC keyboard (Hold Alt for
+                Coupler)
               </span>
             )}
           </div>
 
-          <div
-            style={{
-              fontSize: "0.8rem",
-              display: "flex",
-              gap: "0.6rem",
-              alignItems: "center",
-            }}
-          >
+          <div className="engine-status-pill">
+            {prefs.droneEnabled && <span>Drone: ON • </span>}
             <span>
-              Engine:{" "}
-              {audioUnlocked
-                ? "Ready (Multi-Reed)"
-                : "Tap any key to unlock audio"}
+              {audioUnlocked ? "Multi-Reed Active" : "Tap any key for sound"}
             </span>
           </div>
         </div>
@@ -418,10 +422,6 @@ export const App: React.FC = () => {
           isPaused={isPaused}
           loopEnabled={loopEnabled}
           metronomeEnabled={metronomeEnabled}
-          progressMs={progressMs}
-          totalMs={totalMs}
-          currentPlayingNoteId={currentPlayingNoteId}
-          tonic={prefs.tonic}
           selectedTaal={selectedTaal}
           currentMatra={currentMatra}
           onChangeTaal={(nextTaal) => {
@@ -430,7 +430,6 @@ export const App: React.FC = () => {
               audioEngine.stopTaalLoop();
               setCurrentMatra(null);
             } else if (!isPlaying) {
-              // Start standalone live tabla loop immediately for practice/recording!
               void audioEngine.startTaalLoop(
                 nextTaal,
                 activeComposition.bpm,
@@ -438,6 +437,10 @@ export const App: React.FC = () => {
               );
             }
           }}
+          progressMs={progressMs}
+          totalMs={totalMs}
+          currentPlayingNoteId={currentPlayingNoteId}
+          tonic={prefs.tonic}
           onStartRecording={() => {
             playerRef.current.stop({
               onNoteStart: () => {},
@@ -535,6 +538,34 @@ export const App: React.FC = () => {
           }}
         />
       )}
+
+      {/* Thumb-Friendly Mobile Bottom Navigation Bar */}
+      <nav className="mobile-bottom-nav" aria-label="Mobile Navigation">
+        <button
+          type="button"
+          className={`mobile-nav-item ${mode === "play" ? "active" : ""}`}
+          onClick={() => setMode("play")}
+        >
+          <span>🎹</span>
+          <span>Play</span>
+        </button>
+        <button
+          type="button"
+          className={`mobile-nav-item ${mode === "learn" ? "active" : ""}`}
+          onClick={() => setMode("learn")}
+        >
+          <span>📖</span>
+          <span>Learn Sargam</span>
+        </button>
+        <button
+          type="button"
+          className={`mobile-nav-item ${mode === "studio" ? "active" : ""}`}
+          onClick={() => setMode("studio")}
+        >
+          <span>⏺</span>
+          <span>Song Studio</span>
+        </button>
+      </nav>
     </div>
   );
 };

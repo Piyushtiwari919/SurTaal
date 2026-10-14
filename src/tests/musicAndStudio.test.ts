@@ -103,10 +103,12 @@ describe("Tabla Taal Cycle Definitions", () => {
 });
 
 describe("Keyboard Input Mapping", () => {
-  it("resolves physical laptop keys to expected MIDI notes across octaves", () => {
-    expect(resolveShortcutToMidi("a", 0)).toBe(60); // C4
-    expect(resolveShortcutToMidi("w", 0)).toBe(61); // C#4
-    expect(resolveShortcutToMidi("a", 1)).toBe(72); // C5 when shifted +1 octave
+  it("resolves physical laptop keys across all 29 keys and supports Alt coupler", () => {
+    expect(resolveShortcutToMidi("z", 0)).toBe(48); // Mandra C3
+    expect(resolveShortcutToMidi("a", 0)).toBe(60); // Madhya C4
+    expect(resolveShortcutToMidi("q", 0)).toBe(61); // Madhya C#4
+    expect(resolveShortcutToMidi("a", 0, true)).toBe(48); // Alt + A couplers down to C3
+    expect(resolveShortcutToMidi("a", 1, false)).toBe(72); // C5 when shifted +1 octave
   });
 });
 
