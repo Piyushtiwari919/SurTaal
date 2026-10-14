@@ -1,10 +1,11 @@
 export interface ActiveVoice {
   midi: number;
-  sources: AudioBufferSourceNode[];
+  sources: OscillatorNode[];
   subGains: GainNode[];
   filter: BiquadFilterNode;
   gain: GainNode;
   targetGain: number;
+  attackDurationSec: number;
   startedAt: number;
 }
 
@@ -25,13 +26,10 @@ export class VoiceManager {
   }
 
   public registerVoice(ctx: AudioContext, voice: ActiveVoice): void {
-    // If the same note is already playing, crossfade it out gently over 55ms so there is zero gap
-    if (this.activeVoices.has(voice.midi)) {
-      this.fadeOutAndDetachVoice(
-        ctx,
-        this.activeVoices.get(voice.midi)!,
-        0.055,
-      );
+    // If the same note is re-pressed while still ringing, crossfade it smoothly over 80ms
+    const existing = this.activeVoices.get(voice.midi);
+    if (existing) {
+      this.fadeOutAndDetachVoice(ctx, existing, 0.08);
       this.activeVoices.delete(voice.midi);
     }
 
@@ -45,7 +43,7 @@ export class VoiceManager {
         }
       }
       if (oldestMidi !== null) {
-        this.releaseVoice(ctx, oldestMidi, 0.06);
+        this.releaseVoice(ctx, oldestMidi, 0.08);
       }
     }
 
@@ -55,7 +53,7 @@ export class VoiceManager {
   public releaseVoice(
     ctx: AudioContext,
     midi: number,
-    releaseTimeSec = 0.16,
+    releaseTimeSec = 0.28,
   ): void {
     const voice = this.activeVoices.get(midi);
     if (!voice) return;
@@ -64,25 +62,44 @@ export class VoiceManager {
     this.fadeOutAndDetachVoice(ctx, voice, releaseTimeSec);
   }
 
+  /**
+   * Simulates the physical Harmonium Bellows Air Reservoir on key release:
+   * 1. Computes exact current gain BEFORE canceling automation so gain never snaps to 0.0001.
+   * 2. Holds 70% of the reed body for the first 75ms (bridging finger transitions between notes).
+   * 3. Smoothly fades out the remaining air tail over the rest of releaseTimeSec.
+   */
   private fadeOutAndDetachVoice(
     ctx: AudioContext,
     voice: ActiveVoice,
     releaseTimeSec: number,
   ): void {
     const now = ctx.currentTime;
+    const elapsed = Math.max(0, now - voice.startedAt);
+
+    // Compute exact current envelope value mathematically so cancelScheduledValues never zeros it out
+    const estimatedGain =
+      elapsed < voice.attackDurationSec
+        ? Math.max(0.02, voice.targetGain * (elapsed / voice.attackDurationSec))
+        : voice.targetGain;
 
     try {
-      voice.gain.gain.cancelScheduledValues(now);
-      const currentVal = Math.max(
-        0.0001,
-        voice.gain.gain.value || voice.targetGain,
-      );
-      voice.gain.gain.setValueAtTime(currentVal, now);
-      // Smooth linear-to-exponential air valve release without sudden drop
-      voice.gain.gain.exponentialRampToValueAtTime(
-        0.0001,
-        now + releaseTimeSec,
-      );
+      const param = voice.gain.gain as AudioParam & {
+        cancelAndHoldAtTime?: (time: number) => AudioParam;
+      };
+
+      if (typeof param.cancelAndHoldAtTime === "function") {
+        param.cancelAndHoldAtTime(now);
+      } else {
+        param.cancelScheduledValues(now);
+        param.setValueAtTime(estimatedGain, now);
+      }
+
+      // Stage 1: Bellows Air-Reservoir Bridge (keeps note warm while finger moves to next key)
+      const bridgeTime = Math.min(0.075, releaseTimeSec * 0.35);
+      param.linearRampToValueAtTime(estimatedGain * 0.68, now + bridgeTime);
+
+      // Stage 2: Smooth acoustic decay in wooden chamber
+      param.exponentialRampToValueAtTime(0.0008, now + releaseTimeSec);
 
       for (const src of voice.sources) {
         src.stop(now + releaseTimeSec + 0.03);
@@ -119,9 +136,11 @@ export class VoiceManager {
     const cutoff = 1500 + bellowsIntensity * 1400;
 
     for (const voice of this.activeVoices.values()) {
-      voice.targetGain = targetGain;
-      voice.gain.gain.cancelScheduledValues(now);
-      voice.gain.gain.setTargetAtTime(targetGain, now, 0.05);
+      // Only adjust notes that have completed their initial 18ms attack ramp
+      if (now - voice.startedAt > voice.attackDurationSec) {
+        voice.targetGain = targetGain;
+        voice.gain.gain.setTargetAtTime(targetGain, now, 0.05);
+      }
       voice.filter.frequency.setTargetAtTime(cutoff, now, 0.05);
     }
   }
@@ -132,7 +151,7 @@ export class VoiceManager {
       return;
     }
     for (const midi of Array.from(this.activeVoices.keys())) {
-      this.releaseVoice(ctx, midi, 0.06);
+      this.releaseVoice(ctx, midi, 0.08);
     }
   }
 }

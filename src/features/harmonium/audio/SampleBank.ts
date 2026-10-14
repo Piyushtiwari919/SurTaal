@@ -1,4 +1,3 @@
-import { midiToFrequency } from "../music/pitch";
 import { ReedMode } from "../music/tuning";
 
 export interface SampleBankStatus {
@@ -7,18 +6,18 @@ export interface SampleBankStatus {
   error?: string;
 }
 
-export interface ReedBufferPair {
-  nar: AudioBuffer;
-  mada: AudioBuffer;
+export interface ReedWavePair {
+  nar: PeriodicWave;
+  mada: PeriodicWave;
 }
 
 /**
- * Generates and caches clean, unclipped, phase-locked brass free-reed wavetables
- * with distinct Nar (Male) and Mada (Female) phase/harmonic profiles so dual reeds
- * never suffer from 180-degree destructive phase dropouts during sustained notes.
+ * Generates and caches native Web Audio PeriodicWave harmonic tables.
+ * Because PeriodicWave is synthesized continuously in C++ by the browser's audio engine,
+ * it has ZERO loop points, ZERO buffer wrap clicks, and ZERO phase dropouts.
  */
 export class SampleBank {
-  private bufferCache = new Map<number, ReedBufferPair>();
+  private waveCache = new Map<string, ReedWavePair>();
   private status: SampleBankStatus = {
     mode: "synthesized-reed-bank",
     loadedCount: 0,
@@ -34,144 +33,88 @@ export class SampleBank {
     _reedMode: ReedMode,
   ): Promise<SampleBankStatus> {
     for (const midi of midiNotes) {
-      if (!this.bufferCache.has(midi)) {
-        const pair = this.buildReedBufferPair(ctx, midi);
-        this.bufferCache.set(midi, pair);
-      }
+      this.getOrCreateReedPair(ctx, midi);
     }
 
     this.status = {
       mode: "synthesized-reed-bank",
-      loadedCount: this.bufferCache.size,
+      loadedCount: this.waveCache.size,
     };
     return this.status;
   }
 
-  public getOrCreateBuffer(
-    ctx: AudioContext,
-    midi: number,
-    _reedMode?: ReedMode,
-  ): AudioBuffer {
-    return this.getOrCreateReedPair(ctx, midi).nar;
-  }
-
-  public getOrCreateReedPair(ctx: AudioContext, midi: number): ReedBufferPair {
-    const existing = this.bufferCache.get(midi);
+  public getOrCreateReedPair(ctx: AudioContext, midi: number): ReedWavePair {
+    // Group into 3 register zones (Mandra, Madhya, Taar) for key-tracked harmonic warmth
+    const registerZone = midi < 55 ? "mandra" : midi < 66 ? "madhya" : "taar";
+    const existing = this.waveCache.get(registerZone);
     if (existing) {
       return existing;
     }
-    const created = this.buildReedBufferPair(ctx, midi);
-    this.bufferCache.set(midi, created);
-    return created;
+
+    const pair = this.buildPeriodicWavePair(ctx, registerZone);
+    this.waveCache.set(registerZone, pair);
+    return pair;
   }
 
-  private buildReedBufferPair(ctx: AudioContext, midi: number): ReedBufferPair {
-    const nar = this.buildSingleReedBuffer(ctx, midi, "nar");
-    const mada = this.buildSingleReedBuffer(ctx, midi, "mada");
-    return { nar, mada };
-  }
-
-  /**
-   * Builds a click-free, zero-dropout reed buffer.
-   * Uses an exact integer number of samples per cycle so sample[length - 1] wraps into sample[0]
-   * with zero phase jump even when detuned.
-   */
-  private buildSingleReedBuffer(
+  private buildPeriodicWavePair(
     ctx: AudioContext,
-    midi: number,
-    character: "nar" | "mada",
-  ): AudioBuffer {
-    const sampleRate = ctx.sampleRate;
-    const targetFreq = midiToFrequency(midi);
+    registerZone: "mandra" | "madhya" | "taar",
+  ): ReedWavePair {
+    const fundamentalWeight =
+      registerZone === "mandra" ? 0.45 : registerZone === "madhya" ? 0.65 : 0.8;
+    const highDamping =
+      registerZone === "taar" ? 0.65 : registerZone === "madhya" ? 0.88 : 1.0;
 
-    // Exact integer samples per single wave period guarantees 100% glitch-free looping
-    const samplesPerCycle = Math.max(32, Math.round(sampleRate / targetFreq));
-    const numCycles = 64;
-    const length = samplesPerCycle * numCycles;
-    const buffer = ctx.createBuffer(1, length, sampleRate);
-    const data = buffer.getChannelData(0);
+    // 1. Nar Reed (Male 8' Reed) - carries the solid, unbroken fundamental + woody harmonics
+    const narHarmonics = [
+      0, // DC offset (index 0 must be 0)
+      fundamentalWeight,
+      1.0,
+      0.66,
+      0.4 * highDamping,
+      0.24 * highDamping,
+      0.13 * highDamping,
+      0.04 * highDamping,
+      0.045 * highDamping,
+      0.02 * highDamping,
+      0.01 * highDamping,
+    ];
 
-    const fundamentalWeight = midi < 55 ? 0.42 : midi < 62 ? 0.58 : 0.76;
+    // 2. Mada Reed (Female 8' Celeste Reed) - reduced fundamental so it NEVER cancels out
+    // the Nar reed's fundamental pitch, providing pure, unbroken Indian harmonium shimmer
+    const madaHarmonics = [
+      0,
+      fundamentalWeight * 0.25,
+      0.85,
+      0.72,
+      0.35 * highDamping,
+      0.26 * highDamping,
+      0.14 * highDamping,
+      0.03 * highDamping,
+      0.04 * highDamping,
+      0.015 * highDamping,
+      0.01 * highDamping,
+    ];
 
-    // Nar emphasizes odd/fundamental woody body; Mada emphasizes sweet octave/fifth shimmer
-    // This prevents 180-degree destructive phase cancellation when both reeds beat together.
-    const harmonics =
-      character === "nar"
-        ? [
-            fundamentalWeight,
-            1.0,
-            0.66,
-            0.4,
-            0.24,
-            0.13,
-            0.04,
-            0.045,
-            0.02,
-            0.01,
-          ]
-        : [
-            fundamentalWeight * 0.72,
-            0.92,
-            0.78,
-            0.32,
-            0.28,
-            0.16,
-            0.03,
-            0.05,
-            0.02,
-            0.01,
-          ];
+    const narReal = new Float32Array(narHarmonics.length);
+    const narImag = new Float32Array(narHarmonics);
 
-    const highRegisterDamping = midi > 70 ? 0.65 : midi > 64 ? 0.85 : 1.0;
-    const nyquist = sampleRate * 0.42;
-    const exactCycleFreq = sampleRate / samplesPerCycle;
-    let maxPeak = 0.0001;
-
-    for (let i = 0; i < length; i++) {
-      // Normalized angle for 1 cycle = 2*PI * (i / samplesPerCycle)
-      const baseAngle = (2 * Math.PI * i) / samplesPerCycle;
-      let sample = 0;
-
-      for (let h = 0; h < harmonics.length; h++) {
-        const harmonicNumber = h + 1;
-        const hFreq = exactCycleFreq * harmonicNumber;
-        if (hFreq >= nyquist) break;
-
-        let amp = harmonics[h];
-        if (harmonicNumber >= 4) {
-          amp *= highRegisterDamping;
-        }
-
-        if (hFreq >= 480 && hFreq <= 1550) {
-          amp *= 1.18;
-        } else if (hFreq < 190) {
-          amp *= 0.55;
-        }
-
-        // Quadrature phase offset per harmonic between Nar and Mada prevents simultaneous nulling
-        const phaseShift =
-          character === "mada"
-            ? harmonicNumber % 2 === 0
-              ? Math.PI * 0.35
-              : -Math.PI * 0.25
-            : 0;
-
-        sample += amp * Math.sin(baseAngle * harmonicNumber + phaseShift);
-      }
-
-      data[i] = sample;
-      const absVal = Math.abs(sample);
-      if (absVal > maxPeak) {
-        maxPeak = absVal;
-      }
+    const madaReal = new Float32Array(madaHarmonics.length);
+    const madaImag = new Float32Array(madaHarmonics.length);
+    for (let i = 1; i < madaHarmonics.length; i++) {
+      // Orthogonal cosine/sine split prevents destructive phase cancellation with Nar
+      const angle = i % 2 === 0 ? Math.PI * 0.25 : -Math.PI * 0.25;
+      madaReal[i] = madaHarmonics[i] * Math.cos(angle);
+      madaImag[i] = madaHarmonics[i] * Math.sin(angle);
     }
 
-    const targetPeak = 0.65;
-    const scale = targetPeak / maxPeak;
-    for (let i = 0; i < length; i++) {
-      data[i] *= scale;
-    }
+    const nar = ctx.createPeriodicWave(narReal, narImag, {
+      disableNormalization: false,
+    });
+    const mada = ctx.createPeriodicWave(madaReal, madaImag, {
+      disableNormalization: false,
+    });
 
-    return buffer;
+    return { nar, mada };
   }
 }

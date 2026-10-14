@@ -19,7 +19,7 @@ export const STARTER_DEMO_COMPOSITION: Composition = {
       midi: 61,
       relativeOffset: 0,
       startTimeMs: 0,
-      durationMs: 450,
+      durationMs: 500,
       velocity: 0.9,
     },
     {
@@ -27,7 +27,7 @@ export const STARTER_DEMO_COMPOSITION: Composition = {
       midi: 63,
       relativeOffset: 2,
       startTimeMs: 500,
-      durationMs: 450,
+      durationMs: 500,
       velocity: 0.9,
     },
     {
@@ -35,7 +35,7 @@ export const STARTER_DEMO_COMPOSITION: Composition = {
       midi: 65,
       relativeOffset: 4,
       startTimeMs: 1000,
-      durationMs: 650,
+      durationMs: 700,
       velocity: 0.95,
     },
     {
@@ -43,7 +43,7 @@ export const STARTER_DEMO_COMPOSITION: Composition = {
       midi: 68,
       relativeOffset: 7,
       startTimeMs: 1700,
-      durationMs: 650,
+      durationMs: 700,
       velocity: 0.95,
     },
     {
@@ -51,7 +51,7 @@ export const STARTER_DEMO_COMPOSITION: Composition = {
       midi: 70,
       relativeOffset: 9,
       startTimeMs: 2400,
-      durationMs: 450,
+      durationMs: 500,
       velocity: 0.9,
     },
     {
@@ -59,7 +59,7 @@ export const STARTER_DEMO_COMPOSITION: Composition = {
       midi: 68,
       relativeOffset: 7,
       startTimeMs: 2900,
-      durationMs: 450,
+      durationMs: 500,
       velocity: 0.9,
     },
     {
@@ -67,7 +67,7 @@ export const STARTER_DEMO_COMPOSITION: Composition = {
       midi: 65,
       relativeOffset: 4,
       startTimeMs: 3400,
-      durationMs: 450,
+      durationMs: 500,
       velocity: 0.9,
     },
     {
@@ -75,7 +75,7 @@ export const STARTER_DEMO_COMPOSITION: Composition = {
       midi: 63,
       relativeOffset: 2,
       startTimeMs: 3900,
-      durationMs: 450,
+      durationMs: 500,
       velocity: 0.9,
     },
     {
@@ -83,7 +83,7 @@ export const STARTER_DEMO_COMPOSITION: Composition = {
       midi: 61,
       relativeOffset: 0,
       startTimeMs: 4400,
-      durationMs: 950,
+      durationMs: 1100,
       velocity: 0.95,
     },
   ],

@@ -26,7 +26,7 @@ export class HarmoniumAudioEngine {
   private dryGain: GainNode | null = null;
   private wetGain: GainNode | null = null;
   private convolver: ConvolverNode | null = null;
-  private droneSources: AudioBufferSourceNode[] = [];
+  private droneSources: OscillatorNode[] = [];
   private droneGain: GainNode | null = null;
   private activeDroneStateKey = "";
   private noiseBuffer: AudioBuffer | null = null;
@@ -46,7 +46,7 @@ export class HarmoniumAudioEngine {
     muted: false,
     reedMode: "double",
     bellows: 0.85,
-    reverbMix: 0.12,
+    reverbMix: 0.14,
     droneEnabled: false,
     tonic: 1,
   };
@@ -100,22 +100,12 @@ export class HarmoniumAudioEngine {
     this.triggerNoteInternal(midi, velocity);
   }
 
-  private getExactPitchPlaybackRate(ctx: AudioContext, midi: number): number {
-    const targetFreq = midiToFrequency(midi);
-    const samplesPerCycle = Math.max(
-      32,
-      Math.round(ctx.sampleRate / targetFreq),
-    );
-    const bufferNaturalFreq = ctx.sampleRate / samplesPerCycle;
-    return targetFreq / bufferNaturalFreq;
-  }
-
   private triggerNoteInternal(midi: number, velocity: number): void {
     if (!this.ctx || !this.dryGain || !this.wetGain) return;
 
     const now = this.ctx.currentTime;
     const reedPair = this.sampleBank.getOrCreateReedPair(this.ctx, midi);
-    const baseRate = this.getExactPitchPlaybackRate(this.ctx, midi);
+    const freq = midiToFrequency(midi);
 
     const filter = this.ctx.createBiquadFilter();
     filter.type = "lowpass";
@@ -127,46 +117,44 @@ export class HarmoniumAudioEngine {
       0.08,
       (0.18 + this.settings.bellows * 0.24) * velocity,
     );
+    const attackDurationSec = 0.016;
 
-    // Smooth 22ms bellows air-pressure attack
+    // Fast, smooth 16ms reed response
     voiceGain.gain.setValueAtTime(0.0001, now);
-    voiceGain.gain.linearRampToValueAtTime(targetGain, now + 0.022);
+    voiceGain.gain.linearRampToValueAtTime(targetGain, now + attackDurationSec);
 
-    const sources: AudioBufferSourceNode[] = [];
+    const sources: OscillatorNode[] = [];
     const subGains: GainNode[] = [];
 
-    // 1. Primary 8' Nar Reed (Male Reed - 0 cents)
-    const narSource = this.ctx.createBufferSource();
-    narSource.buffer = reedPair.nar;
-    narSource.loop = true;
-    narSource.playbackRate.setValueAtTime(baseRate, now);
+    // 1. Primary 8' Nar Reed (Unbroken, rock-solid core tone)
+    const narOsc = this.ctx.createOscillator();
+    narOsc.setPeriodicWave(reedPair.nar);
+    narOsc.frequency.setValueAtTime(freq, now);
 
     const narGain = this.ctx.createGain();
-    narGain.gain.setValueAtTime(0.72, now);
-    narSource.connect(narGain);
+    narGain.gain.setValueAtTime(0.55, now);
+    narOsc.connect(narGain);
     narGain.connect(filter);
-    narSource.start(now);
-    sources.push(narSource);
+    narOsc.start(now);
+    sources.push(narOsc);
     subGains.push(narGain);
 
-    // 2. Secondary 8' Mada Reed (Female Celeste Reed - uses orthogonal mada buffer + 3.8 cents shimmer)
-    // Never cancels out Nar reed, ensuring a continuous, unbroken sustain
+    // 2. Secondary 8' Mada Reed (Gentle +2.2 cents upper-harmonic chorus that never dips volume)
     if (
       this.settings.reedMode === "double" ||
       this.settings.reedMode === "triple"
     ) {
-      const madaSource = this.ctx.createBufferSource();
-      madaSource.buffer = reedPair.mada;
-      madaSource.loop = true;
-      madaSource.playbackRate.setValueAtTime(baseRate, now);
-      madaSource.detune.setValueAtTime(3.8, now);
+      const madaOsc = this.ctx.createOscillator();
+      madaOsc.setPeriodicWave(reedPair.mada);
+      madaOsc.frequency.setValueAtTime(freq, now);
+      madaOsc.detune.setValueAtTime(2.2, now);
 
       const madaGain = this.ctx.createGain();
-      madaGain.gain.setValueAtTime(0.42, now);
-      madaSource.connect(madaGain);
+      madaGain.gain.setValueAtTime(0.28, now);
+      madaOsc.connect(madaGain);
       madaGain.connect(filter);
-      madaSource.start(now);
-      sources.push(madaSource);
+      madaOsc.start(now);
+      sources.push(madaOsc);
       subGains.push(madaGain);
     }
 
@@ -177,19 +165,17 @@ export class HarmoniumAudioEngine {
         this.ctx,
         octaveMidi,
       );
-      const octaveRate = this.getExactPitchPlaybackRate(this.ctx, octaveMidi);
-      const taarSource = this.ctx.createBufferSource();
-      taarSource.buffer = octavePair.nar;
-      taarSource.loop = true;
-      taarSource.playbackRate.setValueAtTime(octaveRate, now);
-      taarSource.detune.setValueAtTime(-2.5, now);
+      const taarOsc = this.ctx.createOscillator();
+      taarOsc.setPeriodicWave(octavePair.nar);
+      taarOsc.frequency.setValueAtTime(midiToFrequency(octaveMidi), now);
+      taarOsc.detune.setValueAtTime(-1.5, now);
 
       const taarGain = this.ctx.createGain();
-      taarGain.gain.setValueAtTime(0.24, now);
-      taarSource.connect(taarGain);
+      taarGain.gain.setValueAtTime(0.18, now);
+      taarOsc.connect(taarGain);
       taarGain.connect(filter);
-      taarSource.start(now);
-      sources.push(taarSource);
+      taarOsc.start(now);
+      sources.push(taarOsc);
       subGains.push(taarGain);
     }
 
@@ -204,13 +190,14 @@ export class HarmoniumAudioEngine {
       filter,
       gain: voiceGain,
       targetGain,
+      attackDurationSec,
       startedAt: now,
     });
   }
 
   public noteOff(midi: number): void {
     if (!this.ctx) return;
-    this.voiceManager.releaseVoice(this.ctx, midi, 0.16);
+    this.voiceManager.releaseVoice(this.ctx, midi, 0.28);
   }
 
   public releaseAllNotes(): void {
@@ -519,7 +506,7 @@ export class HarmoniumAudioEngine {
     this.dryGain = ctx.createGain();
     this.wetGain = ctx.createGain();
     this.convolver = ctx.createConvolver();
-    this.convolver.buffer = this.createRoomImpulse(ctx, 0.85, 3.4);
+    this.convolver.buffer = this.createRoomImpulse(ctx, 0.9, 3.2);
 
     const highpassFilter = ctx.createBiquadFilter();
     highpassFilter.type = "highpass";
@@ -543,7 +530,6 @@ export class HarmoniumAudioEngine {
     jaliMellowFilter.frequency.setValueAtTime(2450, ctx.currentTime);
     jaliMellowFilter.Q.setValueAtTime(0.65, ctx.currentTime);
 
-    // High-headroom safety limiter so chords never duck or pump the melody volume
     const compressor = ctx.createDynamicsCompressor();
     compressor.threshold.setValueAtTime(-2.5, ctx.currentTime);
     compressor.knee.setValueAtTime(6, ctx.currentTime);
@@ -597,7 +583,7 @@ export class HarmoniumAudioEngine {
 
     const nextDroneKey = `${this.settings.droneEnabled && !this.settings.muted}-${this.settings.tonic}`;
     if (nextDroneKey === this.activeDroneStateKey) {
-      return; // Do not restart drone if tonic and enabled state haven't changed
+      return;
     }
     this.activeDroneStateKey = nextDroneKey;
 
@@ -626,11 +612,11 @@ export class HarmoniumAudioEngine {
 
     const droneGain = this.ctx.createGain();
     droneGain.gain.setValueAtTime(0.001, this.ctx.currentTime);
-    droneGain.gain.linearRampToValueAtTime(0.075, this.ctx.currentTime + 0.3);
+    droneGain.gain.linearRampToValueAtTime(0.065, this.ctx.currentTime + 0.3);
 
     const droneFilter = this.ctx.createBiquadFilter();
     droneFilter.type = "lowpass";
-    droneFilter.frequency.setValueAtTime(1100, this.ctx.currentTime);
+    droneFilter.frequency.setValueAtTime(1050, this.ctx.currentTime);
 
     droneGain.connect(droneFilter);
     droneFilter.connect(this.dryGain);
@@ -639,23 +625,22 @@ export class HarmoniumAudioEngine {
     const paPair = this.sampleBank.getOrCreateReedPair(this.ctx, mandraPaMidi);
 
     const droneConfigs = [
-      { buf: paPair.nar, midi: mandraPaMidi, detune: 0 },
-      { buf: saPair.nar, midi: madhyaSaMidi, detune: 0 },
-      { buf: saPair.mada, midi: madhyaSaMidi, detune: 3.5 },
+      { wave: paPair.nar, midi: mandraPaMidi, detune: 0 },
+      { wave: saPair.nar, midi: madhyaSaMidi, detune: 0 },
+      { wave: saPair.mada, midi: madhyaSaMidi, detune: 2.0 },
     ];
 
     for (const cfg of droneConfigs) {
-      const src = this.ctx.createBufferSource();
-      src.buffer = cfg.buf;
-      src.loop = true;
-      src.playbackRate.setValueAtTime(
-        this.getExactPitchPlaybackRate(this.ctx, cfg.midi),
+      const osc = this.ctx.createOscillator();
+      osc.setPeriodicWave(cfg.wave);
+      osc.frequency.setValueAtTime(
+        midiToFrequency(cfg.midi),
         this.ctx.currentTime,
       );
-      src.detune.setValueAtTime(cfg.detune, this.ctx.currentTime);
-      src.connect(droneGain);
-      src.start();
-      this.droneSources.push(src);
+      osc.detune.setValueAtTime(cfg.detune, this.ctx.currentTime);
+      osc.connect(droneGain);
+      osc.start();
+      this.droneSources.push(osc);
     }
 
     this.droneGain = droneGain;
