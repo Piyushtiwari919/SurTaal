@@ -6,11 +6,6 @@ export interface ActiveVoice {
   filter: BiquadFilterNode;
   gain: GainNode;
   targetGain: number;
-  attackDurationSec: number;
-  startedAt: number;
-  releaseStartAt: number;
-  releaseStartGain: number;
-  releaseDurationSec: number;
   cleanupTimerId: number | null;
 }
 
@@ -35,29 +30,11 @@ export class VoiceManager {
     return v !== undefined && v.state === "held";
   }
 
-  private estimateCurrentGain(voice: ActiveVoice, now: number): number {
-    if (voice.state === "held") {
-      const elapsed = Math.max(0, now - voice.startedAt);
-      if (elapsed < voice.attackDurationSec) {
-        return Math.max(
-          0.01,
-          voice.targetGain * (elapsed / voice.attackDurationSec),
-        );
-      }
-      return voice.targetGain;
-    } else {
-      const relElapsed = Math.max(0, now - voice.releaseStartAt);
-      const progress = Math.min(
-        1,
-        relElapsed / Math.max(0.02, voice.releaseDurationSec),
-      );
-      return Math.max(
-        0.002,
-        voice.releaseStartGain * Math.pow(1 - progress, 1.8),
-      );
-    }
-  }
-
+  /**
+   * Re-energizes an already-vibrating reed in-place using `setTargetAtTime`.
+   * Because `setTargetAtTime` starts seamlessly from the exact current audio-thread sample value,
+   * there is ZERO gap, ZERO click, and ZERO chance of resetting gain to 0.
+   */
   public tryRetriggerExistingVoice(
     ctx: AudioContext,
     midi: number,
@@ -73,26 +50,12 @@ export class VoiceManager {
     }
 
     const now = ctx.currentTime;
-    const currentGain = this.estimateCurrentGain(existing, now);
-    const param = existing.gain.gain as AudioParam & {
-      cancelAndHoldAtTime?: (t: number) => AudioParam;
-    };
 
     try {
-      if (typeof param.cancelAndHoldAtTime === "function") {
-        param.cancelAndHoldAtTime(now);
-      } else {
-        param.cancelScheduledValues(now);
-        param.setValueAtTime(currentGain, now);
-      }
-
-      param.linearRampToValueAtTime(targetGain, now + 0.012);
-      existing.filter.frequency.setTargetAtTime(cutoffFreq, now, 0.02);
-
+      existing.gain.gain.setTargetAtTime(targetGain, now, 0.01);
+      existing.filter.frequency.setTargetAtTime(cutoffFreq, now, 0.015);
       existing.state = "held";
       existing.targetGain = targetGain;
-      existing.attackDurationSec = 0.012;
-      existing.startedAt = now;
       return true;
     } catch {
       this.forceDestroyVoice(existing, ctx);
@@ -110,15 +73,14 @@ export class VoiceManager {
 
     if (this.voicesByMidi.size >= this.maxPolyphony) {
       let victimMidi: number | null = null;
-      let oldestTime = Infinity;
-
       for (const [midi, v] of this.voicesByMidi.entries()) {
-        const sortTime =
-          v.state === "releasing" ? v.startedAt - 1000 : v.startedAt;
-        if (sortTime < oldestTime) {
-          oldestTime = sortTime;
+        if (v.state === "releasing") {
           victimMidi = midi;
+          break;
         }
+      }
+      if (victimMidi === null) {
+        victimMidi = this.voicesByMidi.keys().next().value ?? null;
       }
       if (victimMidi !== null) {
         const victim = this.voicesByMidi.get(victimMidi);
@@ -132,37 +94,24 @@ export class VoiceManager {
     this.voicesByMidi.set(voice.midi, voice);
   }
 
+  /**
+   * Releases a note using a smooth exponential air-valve timeConstant (`0.038s`).
+   * Never calls `cancelScheduledValues` or reads `param.value` on the JS thread,
+   * so rapid notes and sustained notes alike decay smoothly without ever breaking.
+   */
   public releaseVoice(
     ctx: AudioContext,
     midi: number,
-    releaseTimeSec = 0.22,
+    releaseTimeSec = 0.18,
   ): void {
     const voice = this.voicesByMidi.get(midi);
     if (!voice || voice.state === "releasing") return;
 
     const now = ctx.currentTime;
-    const currentGain = this.estimateCurrentGain(voice, now);
-
     voice.state = "releasing";
-    voice.releaseStartAt = now;
-    voice.releaseStartGain = currentGain;
-    voice.releaseDurationSec = releaseTimeSec;
 
     try {
-      const param = voice.gain.gain as AudioParam & {
-        cancelAndHoldAtTime?: (t: number) => AudioParam;
-      };
-
-      if (typeof param.cancelAndHoldAtTime === "function") {
-        param.cancelAndHoldAtTime(now);
-      } else {
-        param.cancelScheduledValues(now);
-        param.setValueAtTime(currentGain, now);
-      }
-
-      const bridgeTime = Math.min(0.065, releaseTimeSec * 0.35);
-      param.linearRampToValueAtTime(currentGain * 0.72, now + bridgeTime);
-      param.linearRampToValueAtTime(0.0001, now + releaseTimeSec);
+      voice.gain.gain.setTargetAtTime(0.0001, now, 0.038);
 
       voice.cleanupTimerId = window.setTimeout(
         () => {
@@ -188,9 +137,7 @@ export class VoiceManager {
 
     if (ctx) {
       try {
-        const now = ctx.currentTime;
-        voice.gain.gain.cancelScheduledValues(now);
-        voice.gain.gain.setValueAtTime(0.0001, now);
+        voice.gain.gain.setTargetAtTime(0.0001, ctx.currentTime, 0.005);
       } catch {
         // Ignore if context is closed
       }
@@ -224,18 +171,15 @@ export class VoiceManager {
     bellowsIntensity: number,
   ): void {
     const now = ctx.currentTime;
-    const targetGain = 0.18 + bellowsIntensity * 0.24;
-    const cutoff = 1500 + bellowsIntensity * 1400;
+    const targetGain = 0.15 + bellowsIntensity * 0.13;
+    const cutoff = 1200 + bellowsIntensity * 900;
 
     for (const voice of this.voicesByMidi.values()) {
-      if (
-        voice.state === "held" &&
-        now - voice.startedAt > voice.attackDurationSec
-      ) {
+      if (voice.state === "held") {
         voice.targetGain = targetGain;
-        voice.gain.gain.setTargetAtTime(targetGain, now, 0.05);
+        voice.gain.gain.setTargetAtTime(targetGain, now, 0.035);
+        voice.filter.frequency.setTargetAtTime(cutoff, now, 0.035);
       }
-      voice.filter.frequency.setTargetAtTime(cutoff, now, 0.05);
     }
   }
 

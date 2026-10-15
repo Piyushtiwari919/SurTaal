@@ -17,6 +17,7 @@ export class CompositionPlayer {
   private tempoScale = 1;
   private elapsedMs = 0;
   private lastTickPerfMs = 0;
+  private lastProgressReportMs = -100;
   private triggeredStarts = new Set<string>();
   private triggeredEnds = new Set<string>();
   private activeNotes = new Map<string, CompositionNoteEvent>();
@@ -40,6 +41,7 @@ export class CompositionPlayer {
     this.isPaused = false;
     this.elapsedMs = 0;
     this.lastTickPerfMs = performance.now();
+    this.lastProgressReportMs = -100;
     this.triggeredStarts.clear();
     this.triggeredEnds.clear();
     this.activeNotes.clear();
@@ -63,7 +65,19 @@ export class CompositionPlayer {
         }
       }
 
-      // 1. Process note ends first so same-pitch re-triggers on the exact same beat never get killed
+      // 1. Process note starts first for seamless legato overlap
+      for (const note of composition.notes) {
+        if (
+          this.elapsedMs >= note.startTimeMs &&
+          !this.triggeredStarts.has(note.id)
+        ) {
+          this.triggeredStarts.add(note.id);
+          this.activeNotes.set(note.id, note);
+          callbacks.onNoteStart(note);
+        }
+      }
+
+      // 2. Process note ends second
       for (const note of composition.notes) {
         const endMs = note.startTimeMs + note.durationMs;
         if (this.elapsedMs >= endMs && !this.triggeredEnds.has(note.id)) {
@@ -79,21 +93,14 @@ export class CompositionPlayer {
         }
       }
 
-      // 2. Process note starts second
-      for (const note of composition.notes) {
-        if (
-          this.elapsedMs >= note.startTimeMs &&
-          !this.triggeredStarts.has(note.id)
-        ) {
-          this.triggeredStarts.add(note.id);
-          this.activeNotes.set(note.id, note);
-          callbacks.onNoteStart(note);
-        }
+      // Throttle UI progress state updates to every 80ms so React never stutters audio
+      if (this.elapsedMs - this.lastProgressReportMs >= 80) {
+        this.lastProgressReportMs = this.elapsedMs;
+        callbacks.onProgress(Math.min(this.elapsedMs, totalMs), totalMs);
       }
 
-      callbacks.onProgress(Math.min(this.elapsedMs, totalMs), totalMs);
-
       if (this.elapsedMs >= totalMs + 80) {
+        callbacks.onProgress(totalMs, totalMs);
         for (const active of this.activeNotes.values()) {
           callbacks.onNoteEnd(active);
         }
@@ -101,6 +108,7 @@ export class CompositionPlayer {
 
         if (this.loop) {
           this.elapsedMs = 0;
+          this.lastProgressReportMs = -100;
           this.triggeredStarts.clear();
           this.triggeredEnds.clear();
           this.lastBeatNumber = -1;
@@ -117,11 +125,11 @@ export class CompositionPlayer {
     this.timerId = window.setInterval(tick, 16);
   }
 
-  public pause(callbacks: PlaybackCallbacks): void {
+  public pause(_callbacks: PlaybackCallbacks): void {
     if (!this.isPlaying || this.isPaused) return;
     this.isPaused = true;
     for (const active of this.activeNotes.values()) {
-      callbacks.onNoteEnd(active);
+      _callbacks.onNoteEnd(active);
     }
     this.activeNotes.clear();
   }

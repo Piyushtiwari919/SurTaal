@@ -76,9 +76,9 @@ export const HarmoniumKeyboard: React.FC<HarmoniumKeyboardProps> = ({
     "stacked",
   );
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
-  const pointerOriginsRef = useRef<Map<number, { x: number; y: number }>>(
-    new Map(),
-  );
+  const pointerStateRef = useRef<
+    Map<number, { startX: number; startY: number; lastMidi: number }>
+  >(new Map());
 
   useEffect(() => {
     if (typeof window === "undefined" || !window.matchMedia) return;
@@ -118,9 +118,13 @@ export const HarmoniumKeyboard: React.FC<HarmoniumKeyboardProps> = ({
     } catch {
       // Ignore synthetic events in automated tests
     }
-    pointerOriginsRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
     const midi = extractMidiFromTarget(e.target);
     if (midi !== null) {
+      pointerStateRef.current.set(e.pointerId, {
+        startX: e.clientX,
+        startY: e.clientY,
+        lastMidi: midi,
+      });
       onPointerDownKey(e.pointerId, midi);
     }
   };
@@ -128,21 +132,22 @@ export const HarmoniumKeyboard: React.FC<HarmoniumKeyboardProps> = ({
   const handleBedPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.pointerType === "mouse" && e.buttons === 0) return;
 
-    // Require at least 6px of intentional horizontal/vertical movement before sliding keys
-    // so natural fingertip micro-wobble never breaks a held note
-    const origin = pointerOriginsRef.current.get(e.pointerId);
-    if (origin) {
-      const dist = Math.hypot(e.clientX - origin.x, e.clientY - origin.y);
-      if (dist < 6) return;
-    }
+    const state = pointerStateRef.current.get(e.pointerId);
+    if (!state) return;
+
+    // Ignore tiny fingertip micro-movements (< 10px) so held notes never jitter
+    const movedDist = Math.hypot(
+      e.clientX - state.startX,
+      e.clientY - state.startY,
+    );
+    if (movedDist < 10) return;
 
     const elUnderFinger = document.elementFromPoint(e.clientX, e.clientY);
     const midi = extractMidiFromTarget(elUnderFinger);
-    if (midi !== null) {
-      pointerOriginsRef.current.set(e.pointerId, {
-        x: e.clientX,
-        y: e.clientY,
-      });
+    if (midi !== null && midi !== state.lastMidi) {
+      state.startX = e.clientX;
+      state.startY = e.clientY;
+      state.lastMidi = midi;
       onPointerEnterKey(e.pointerId, midi);
     }
   };
@@ -150,7 +155,7 @@ export const HarmoniumKeyboard: React.FC<HarmoniumKeyboardProps> = ({
   const handleBedPointerUpOrCancel = (
     e: React.PointerEvent<HTMLDivElement>,
   ) => {
-    pointerOriginsRef.current.delete(e.pointerId);
+    pointerStateRef.current.delete(e.pointerId);
     try {
       if (e.currentTarget.hasPointerCapture(e.pointerId)) {
         e.currentTarget.releasePointerCapture(e.pointerId);

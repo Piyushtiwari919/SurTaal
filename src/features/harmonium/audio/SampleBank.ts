@@ -12,9 +12,12 @@ export interface ReedWavePair {
 }
 
 /**
- * Generates and caches native Web Audio PeriodicWave harmonic tables.
- * Preserves the exact Indian Palitana harmonium timbre while keeping the primary
- * fundamental and octave anchored in the Nar reed so Mada shimmer never causes volume dips.
+ * Generates authentic Indian Free-Reed PeriodicWave tables using the physical
+ * acoustic Fourier series of a 32% duty-cycle brass reed slot inside a wooden chamber:
+ *   A(k) = |sin(k * pi * 0.32) / (k * pi * 0.32)| * exp(-0.15 * (k - 1))
+ *
+ * This naturally dips the nasal 3rd harmonic and rolls off upper buzz, producing
+ * the warm, woody, singing tone of a real Indian Mehfil harmonium.
  */
 export class SampleBank {
   private waveCache = new Map<string, ReedWavePair>();
@@ -44,62 +47,48 @@ export class SampleBank {
   }
 
   public getOrCreateReedPair(ctx: AudioContext, midi: number): ReedWavePair {
-    const registerZone = midi < 55 ? "mandra" : midi < 66 ? "madhya" : "taar";
+    const registerZone = midi < 56 ? "mandra" : midi < 68 ? "madhya" : "taar";
     const existing = this.waveCache.get(registerZone);
     if (existing) {
       return existing;
     }
 
-    const pair = this.buildPeriodicWavePair(ctx, registerZone);
+    const pair = this.buildAuthenticReedWaves(ctx, registerZone);
     this.waveCache.set(registerZone, pair);
     return pair;
   }
 
-  private buildPeriodicWavePair(
+  private buildAuthenticReedWaves(
     ctx: AudioContext,
     registerZone: "mandra" | "madhya" | "taar",
   ): ReedWavePair {
-    const fundamentalWeight =
-      registerZone === "mandra" ? 0.45 : registerZone === "madhya" ? 0.65 : 0.8;
-    const highDamping =
-      registerZone === "taar" ? 0.65 : registerZone === "madhya" ? 0.88 : 1.0;
+    const numHarmonics = 10;
+    const narReal = new Float32Array(numHarmonics + 1);
+    const narImag = new Float32Array(numHarmonics + 1);
+    const madaReal = new Float32Array(numHarmonics + 1);
+    const madaImag = new Float32Array(numHarmonics + 1);
 
-    // 1. Nar Reed (Male 8' Reed) - carries the unbroken Indian harmonium tone
-    const narHarmonics = [
-      0,
-      fundamentalWeight,
-      1.0,
-      0.66,
-      0.4 * highDamping,
-      0.24 * highDamping,
-      0.13 * highDamping,
-      0.04 * highDamping,
-      0.045 * highDamping,
-      0.02 * highDamping,
-      0.01 * highDamping,
-    ];
+    const dutyCycle = 0.32; // Physical free-reed tongue aperture ratio
+    const registerRollOff =
+      registerZone === "taar" ? 0.24 : registerZone === "madhya" ? 0.16 : 0.13;
 
-    // 2. Mada Reed (Female 8' Celeste Reed) - zero fundamental (0) and gentle upper harmonics
-    // so it adds acoustic reed chorus without ever cancelling out the Nar reed's core body
-    const madaHarmonics = [
-      0,
-      0,
-      0.35,
-      0.65,
-      0.45 * highDamping,
-      0.3 * highDamping,
-      0.18 * highDamping,
-      0.05 * highDamping,
-      0.05 * highDamping,
-      0.02 * highDamping,
-      0.01 * highDamping,
-    ];
+    for (let k = 1; k <= numHarmonics; k++) {
+      const x = k * Math.PI * dutyCycle;
+      const sincEnvelope = Math.abs(Math.sin(x) / x);
+      const damping = Math.exp(-registerRollOff * (k - 1));
+      const amp = sincEnvelope * damping;
 
-    const narReal = new Float32Array(narHarmonics.length);
-    const narImag = new Float32Array(narHarmonics);
+      // Smooth quadrature phase distribution prevents spiky waveform peaks ("phata bass")
+      const phase = (Math.PI * k * (k - 1)) / numHarmonics;
+      narReal[k] = amp * Math.cos(phase);
+      narImag[k] = amp * Math.sin(phase);
 
-    const madaReal = new Float32Array(madaHarmonics.length);
-    const madaImag = new Float32Array(madaHarmonics);
+      // Mada reed omits H1 fundamental so dual-reed beating never dips the core note volume
+      const madaAmp = k === 1 ? 0 : amp * 0.85;
+      const madaPhase = phase + 0.78;
+      madaReal[k] = madaAmp * Math.cos(madaPhase);
+      madaImag[k] = madaAmp * Math.sin(madaPhase);
+    }
 
     const nar = ctx.createPeriodicWave(narReal, narImag, {
       disableNormalization: false,
