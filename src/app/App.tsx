@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { Analytics } from '@vercel/analytics/react';
 import { audioEngine } from "../features/harmonium/audio/AudioEngine";
 import { UnifiedInputController } from "../features/harmonium/keyboard/InputController";
 import { triggerKeyHaptic } from "../features/harmonium/keyboard/haptics";
@@ -566,6 +567,7 @@ export const App: React.FC = () => {
           <span>Song Studio</span>
         </button>
       </nav>
+      <Analytics />
     </div>
   );
 };
